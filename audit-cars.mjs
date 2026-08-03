@@ -116,29 +116,56 @@ async function main() {
 
   // ---- report ----
   const today = new Date().toISOString().slice(0, 10);
+  // AUTO-COMMIT: when AUDIT_APPLY=1, insert the new sets straight into index.html's
+  // CATALOG (minimal edit, preserving all existing entries) so the workflow can commit
+  // and the Pages site self-updates. The ignore list is the veto — anything not ignored
+  // and passing the car filters gets added here.
+  const applied = process.env.AUDIT_APPLY === '1' && findings.length > 0;
+  if (applied) await applyToCatalog(findings);
+
+  const verb = applied ? 'Added' : 'Found';
   let md;
   if (findings.length === 0) {
     md = `# 🚗 Brick Garage car audit — ${today}\n\nNo new car sets missing. Your collection is complete against Technic + Speed Champions car lists. ✅\n`;
   } else {
-    md = `# 🚗 Brick Garage car audit — ${today}\n\nFound **${findings.length}** car set(s) not in your catalog:\n\n`;
+    md = `# 🚗 Brick Garage car audit — ${today}\n\n${verb} **${findings.length}** car set(s)${applied ? ' to your catalog' : ' not in your catalog'}:\n\n`;
     md += `| Set | Name | Theme | Year |\n| --- | --- | --- | --- |\n`;
     for (const f of findings) md += `| ${f.n} | ${f.name} | ${f.theme} | ${f.year} |\n`;
-    md += `\n_To stop flagging any of these (e.g. F1 sets you skip), add their numbers to \`ignore-skus.json\`._\n`;
-    md += `\nCATALOG entries to paste if you want to add one:\n\n\`\`\`js\n`;
-    for (const f of findings) {
-      md += `{"n":"${f.n}","name":"${f.name}","theme":"${f.theme}","year":${f.year},"prod":"available"},\n`;
+    if (applied) {
+      md += `\n_These were committed automatically. If you didn't want one, remove its entry from \`index.html\` and add its number to \`ignore-skus.json\` so it won't come back. Piece counts aren't auto-filled — edit if you want them._\n`;
+    } else {
+      md += `\n_To stop flagging any of these (e.g. F1 sets you skip), add their numbers to \`ignore-skus.json\`._\n`;
+      md += `\nCATALOG entries to paste if you want to add one:\n\n\`\`\`js\n`;
+      for (const f of findings) md += `{"n":"${f.n}","name":"${f.name}","theme":"${f.theme}","year":${f.year},"prod":"available"},\n`;
+      md += `\`\`\`\n`;
     }
-    md += `\`\`\`\n`;
   }
 
   await writeFile('audit-report.md', md);
   console.log(md);
-  console.log(`[audit] ${findings.length} new car set(s); catalog has ${have.size}, suppressed ${suppress.size}`);
+  console.log(`[audit] ${verb.toLowerCase()} ${findings.length} car set(s); catalog had ${have.size}, suppressed ${suppress.size}`);
 
-  // expose count to the GitHub Actions workflow
+  // expose to the workflow
   if (process.env.GITHUB_OUTPUT) {
-    await writeFile(process.env.GITHUB_OUTPUT, `new_count=${findings.length}\n`, { flag: 'a' });
+    await writeFile(process.env.GITHUB_OUTPUT, `new_count=${findings.length}\napplied=${applied ? 1 : 0}\n`, { flag: 'a' });
   }
+}
+
+// Insert new sets into index.html's CATALOG with a minimal edit (existing entries
+// untouched), so the git diff is just the appended objects.
+async function applyToCatalog(findings) {
+  const html = await readFile(CATALOG_PATH, 'utf8');
+  const m = html.match(/const CATALOG = \[[\s\S]*?\];/);
+  if (!m) throw new Error(`CATALOG array not found in ${CATALOG_PATH} for apply`);
+  const block = m[0];
+  const closeIdx = block.lastIndexOf(']');
+  const entries = findings.map((f) =>
+    JSON.stringify({ n: f.n, name: f.name, theme: f.theme, year: f.year, prod: 'available' })
+  );
+  const before = block.slice(0, closeIdx).trimEnd();
+  const insert = (before.endsWith('[') ? '' : ',') + entries.join(',');
+  const newBlock = block.slice(0, closeIdx) + insert + block.slice(closeIdx);
+  await writeFile(CATALOG_PATH, html.replace(block, newBlock));
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });
