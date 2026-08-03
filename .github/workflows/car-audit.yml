@@ -1,0 +1,59 @@
+name: Brick Garage car audit
+
+# Runs weekly (and on demand) to check for new LEGO car sets you don't own yet.
+# Fully self-contained on GitHub: no servers, no secrets — reports via a GitHub Issue.
+
+on:
+  schedule:
+    - cron: '0 8 * * 1'        # Mondays 08:00 UTC
+  workflow_dispatch:            # manual "Run workflow" button
+
+permissions:
+  contents: read
+  issues: write                 # to open/update the report issue
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Run car audit
+        id: audit
+        run: node audit-cars.mjs
+
+      - name: Add report to job summary
+        if: always()
+        run: cat audit-report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Open / update / close report issue
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          COUNT="${{ steps.audit.outputs.new_count }}"
+          gh label create car-audit --color FFB020 --description "Automated car-set audit" --force || true
+          EXISTING=$(gh issue list --label car-audit --state open --json number --jq '.[0].number // empty')
+
+          if [ "${COUNT:-0}" -gt 0 ]; then
+            if [ -n "$EXISTING" ]; then
+              gh issue edit "$EXISTING" --body-file audit-report.md
+              echo "Updated issue #$EXISTING ($COUNT set(s))."
+            else
+              gh issue create --title "🚗 New LEGO car sets you're missing" \
+                --label car-audit --body-file audit-report.md
+              echo "Opened new issue ($COUNT set(s))."
+            fi
+          else
+            if [ -n "$EXISTING" ]; then
+              gh issue close "$EXISTING" --comment "All caught up — no missing car sets. ✅"
+              echo "Closed issue #$EXISTING (nothing missing)."
+            else
+              echo "Nothing missing, no open issue. ✅"
+            fi
+          fi
