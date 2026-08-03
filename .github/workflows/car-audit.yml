@@ -1,16 +1,17 @@
 name: Brick Garage car audit
 
-# Runs weekly (and on demand) to check for new LEGO car sets you don't own yet.
-# Fully self-contained on GitHub: no servers, no secrets — reports via a GitHub Issue.
+# Weekly (and on-demand) check for new LEGO car sets. AUTO-COMMIT mode: new sets
+# that pass the car filters and aren't in ignore-skus.json are appended to
+# index.html's CATALOG and committed, so the Pages site self-updates.
+# ignore-skus.json is the veto list — put anything you DON'T want in there.
 
 on:
   schedule:
     - cron: '0 8 * * 1'        # Mondays 08:00 UTC
-  workflow_dispatch:            # manual "Run workflow" button
+  workflow_dispatch:
 
 permissions:
-  contents: read
-  issues: write                 # to open/update the report issue
+  contents: write               # to commit the updated index.html
 
 jobs:
   audit:
@@ -20,40 +21,29 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
 
-      - name: Run car audit
+      - name: Run car audit (apply)
         id: audit
+        env:
+          AUDIT_APPLY: '1'        # write new sets into index.html
         run: node audit-cars.mjs
 
       - name: Add report to job summary
         if: always()
         run: cat audit-report.md >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Open / update / close report issue
+      - name: Commit new sets
         if: always()
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          COUNT="${{ steps.audit.outputs.new_count }}"
-          gh label create car-audit --color FFB020 --description "Automated car-set audit" --force || true
-          EXISTING=$(gh issue list --label car-audit --state open --json number --jq '.[0].number // empty')
-
-          if [ "${COUNT:-0}" -gt 0 ]; then
-            if [ -n "$EXISTING" ]; then
-              gh issue edit "$EXISTING" --body-file audit-report.md
-              echo "Updated issue #$EXISTING ($COUNT set(s))."
-            else
-              gh issue create --title "🚗 New LEGO car sets you're missing" \
-                --label car-audit --body-file audit-report.md
-              echo "Opened new issue ($COUNT set(s))."
-            fi
+          if git diff --quiet -- index.html; then
+            echo "No catalog changes — nothing to commit."
           else
-            if [ -n "$EXISTING" ]; then
-              gh issue close "$EXISTING" --comment "All caught up — no missing car sets. ✅"
-              echo "Closed issue #$EXISTING (nothing missing)."
-            else
-              echo "Nothing missing, no open issue. ✅"
-            fi
+            git config user.name  "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add index.html
+            git commit -m "Auto-add ${{ steps.audit.outputs.new_count }} new car set(s) from audit"
+            git push
+            echo "Committed ${{ steps.audit.outputs.new_count }} new set(s)."
           fi
