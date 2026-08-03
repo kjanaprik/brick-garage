@@ -331,6 +331,27 @@
     .toolbar-right { margin-left: 0; }
   }
   @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+  /* ---- live price block ---- */
+  .price-box { margin: 0 0 10px; border: 1px solid var(--border); border-radius: 8px; background: rgba(255,255,255,0.02); overflow: hidden; }
+  .price-box > summary { display: flex; align-items: center; gap: 8px; padding: 7px 10px; cursor: pointer; list-style: none; user-select: none; }
+  .price-box > summary::-webkit-details-marker { display: none; }
+  .price-box > summary::after { content: '▾'; margin-left: auto; color: var(--text-faint); font-size: 11px; transition: transform .15s; }
+  .price-box[open] > summary::after { transform: rotate(180deg); }
+  .pb-lead { font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em; color: var(--text-faint); }
+  .pb-price { font-family: 'Saira', sans-serif; font-weight: 700; font-size: 14px; color: var(--available); }
+  .pb-price.sale { color: #e5484d; }
+  .pb-shop { font-size: 11px; color: var(--text-dim); }
+  .pr-list { border-top: 1px solid var(--border); padding: 4px 10px 6px; display: grid; gap: 1px; }
+  .pr-row { display: flex; justify-content: space-between; align-items: baseline; font-size: 11.5px; padding: 2px 0; }
+  .pr-shop { color: var(--text-dim); }
+  .pr-val { font-family: 'Saira', sans-serif; font-weight: 600; color: var(--text); }
+  .pr-row.best .pr-val { color: var(--available); }
+  .pr-val.sale { color: #e5484d; }
+  .pr-was { color: var(--text-faint); text-decoration: line-through; font-weight: 400; margin-left: 3px; }
+  .pr-row.oos { opacity: .45; }
+  .pr-row.oos .pr-val::after { content: ' · OOS'; font-size: 9.5px; color: var(--text-faint); }
+  .pr-open { display: block; padding: 6px 10px; border-top: 1px solid var(--border); font-size: 11px; color: var(--accent); text-decoration: none; }
+  .pr-open:hover { background: rgba(245,166,35,0.08); }
 </style>
 
 <div class="wrap">
@@ -637,7 +658,7 @@ function cardHTML(s){
         <button class="prod ${s.prod}" data-act="prod"><span class="dot"></span>${s.prod==='available'?'Available':'Retired'}${s.note?`<span class="prod-note">${escapeHTML(s.note)}</span>`:''}</button>
       </div>
     </div>
-    ${s.bsEur ? `<a class="bs-link" href="https://www.google.com/search?q=LEGO%20${s.n}%20site:brickshop.eu" target="_blank" rel="noopener" title="Brickshop netto €${s.bsEur.toFixed(2)} + €20 shipping, +24% Icelandic VAT, @ 145 kr/€ = landed to Iceland. Click to open on Brickshop.eu"><span class="bs-store">Brickshop</span><span class="bs-price">€${s.bsEur.toFixed(2)}</span><span class="bs-landed">≈ ${fmt(Math.round((s.bsEur+20)*1.24*145))} kr landed</span><span class="bs-arrow">↗</span></a>` : ''}
+    ${priceBlockHTML(s)}
     <div class="seg">
       <button data-act="status" data-val="owned" ${seg('owned')}>Owned</button>
       <button data-act="status" data-val="wishlist" ${seg('wishlist')}>Wishlist</button>
@@ -659,6 +680,30 @@ function cardHTML(s){
 }
 
 function escapeHTML(str){ return String(str).replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+// ---------- Live prices (from prices.json, refreshed daily by GitHub Actions) ----------
+let PRICES = {};
+const SHOP_ORDER = ['Kubbabúðin','Coolshop','Boozt','Booztlet','Kids-world','ELKO','Brickshop'];
+function priceBlockHTML(s){
+  const p = PRICES[s.n];
+  if (p && p.cheapest!=null){
+    const rows = SHOP_ORDER.filter(sh=>p.shops[sh] && p.shops[sh].p!=null).map(sh=>{
+      const d = p.shops[sh];
+      const cls = (d.p===p.cheapest && d.stock) ? 'best' : (!d.stock ? 'oos' : '');
+      const was = d.sale && d.was ? ` <span class="pr-was">${fmt(d.was)}</span>` : '';
+      return `<div class="pr-row ${cls}"><span class="pr-shop">${sh}</span><span class="pr-val ${d.sale?'sale':''}">${fmt(d.p)} kr${was}</span></div>`;
+    }).join('');
+    return `<details class="price-box">
+      <summary><span class="pb-lead">Cheapest</span><span class="pb-price ${p.on_sale?'sale':''}">${fmt(p.cheapest)} kr</span><span class="pb-shop">${p.shop}${p.on_sale?' · sale':''}</span></summary>
+      <div class="pr-list">${rows}</div>
+      ${p.url?`<a class="pr-open" href="${p.url}" target="_blank" rel="noopener">Open ${p.shop} ↗</a>`:''}</details>`;
+  }
+  // fallback: static Brickshop estimate until prices.json is available
+  if (s.bsEur){
+    return `<a class="bs-link" href="https://www.google.com/search?q=LEGO%20${s.n}%20site:brickshop.eu" target="_blank" rel="noopener" title="Brickshop estimate; live prices refresh daily"><span class="bs-store">Brickshop</span><span class="bs-price">€${s.bsEur.toFixed(2)}</span><span class="bs-landed">≈ ${fmt(Math.round((s.bsEur+20)*1.24*145))} kr landed</span><span class="bs-arrow">↗</span></a>`;
+  }
+  return '';
+}
 
 // image fallback: Brickset -> Rebrickable -> built-in placeholder
 window.imgFallback = function(img){
@@ -775,5 +820,11 @@ document.getElementById('importFile').addEventListener('change',(e)=>{
 });
 
 // ---------- Boot ----------
-(async ()=>{ await load(); render(); })();
+(async ()=>{
+  await load(); render();
+  try{
+    const r = await fetch('prices.json?_='+Date.now(), {cache:'no-store'});
+    if (r.ok){ const d = await r.json(); PRICES = d.sets||{}; window.PRICES_META={updated:d.updated,fx:d.fx}; render(); }
+  }catch{}
+})();
 </script>
