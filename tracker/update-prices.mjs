@@ -67,8 +67,13 @@ async function main() {
   const sets = {}; let fx = null;
   for (const [label, rows] of results) for (const r of rows) {
     if (label === 'Brickshop' && r.fx_rate) fx = r.fx_rate;
-    (sets[r.sku] ??= { shops: {} }).shops[label] =
-      { p: r.price_isk, sale: !!r.on_sale, was: r.rrp_isk ?? null, stock: r.in_stock !== false, url: r.url || null };
+    const e = (sets[r.sku] ??= { shops: {} });
+    e.shops[label] = {
+      p: r.price_isk, sale: !!r.on_sale, was: r.rrp_isk ?? null,
+      stock: r.in_stock !== false, url: r.url || null,
+      ...(label === 'Brickshop' && r.bundled_isk != null ? { bundled: r.bundled_isk } : {}),
+    };
+    if (r.pieces && !e.pieces) e.pieces = r.pieces;   // real piece count (from Brickshop spec table)
   }
 
   const alerts = [];

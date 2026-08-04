@@ -195,6 +195,18 @@ function parseProduct(html, sku, path) {
   const on_sale = base_eur != null && base_eur > price_eur + 0.01;
   const discount_pct = on_sale ? Math.round((1 - price_eur / base_eur) * 100) : 0;
 
+  // Piece count from the spec table ("Amount of parts: 358" / "Aantal onderdelen").
+  const pieces = (() => {
+    const t = html.replace(/<[^>]+>/g, ' ');
+    const m = t.match(/(?:amount of parts|number of parts|aantal onderdelen)[^0-9]{0,25}(\d{2,5})/i);
+    return m ? Number(m[1]) : null;
+  })();
+
+  // Bundled landed price: marginal shipping only (per-kg, shared floor/base dropped),
+  // i.e. the cost when this set rides along in a larger order.
+  const bundled_isk = price_eur == null ? null
+    : Math.round((price_eur / EU_VAT + SHIP_PER_KG * (weight_kg ?? SHIP_FALLBACK_KG)) * VAT * EUR_ISK);
+
   return {
     retailer: RETAILER,
     sku,
@@ -212,6 +224,8 @@ function parseProduct(html, sku, path) {
     fx_rate: EUR_ISK,               // EUR->ISK used for this landed price
     base_eur,                       // pre-discount EUR (incl. NL VAT), null if not on sale
     discount_pct,                   // % off vs base, 0 if not on sale
+    bundled_isk,                    // landed price when bundled in a larger order
+    pieces,                         // piece count from the spec table (or null)
   };
 }
 
