@@ -686,7 +686,7 @@ function escapeHTML(str){ return String(str).replace(/[&<>"']/g, c=>({'&':'&amp;
 
 // ---------- Live prices (from prices.json, refreshed daily by GitHub Actions) ----------
 let PRICES = {};
-const SHOP_ORDER = ['Kubbabúðin','Coolshop','Boozt','Booztlet','Kids-world','ELKO','Brickshop'];
+const SHOP_ORDER = ['Kubbabúðin','Coolshop','Boozt','Booztlet','Kids-world','ELKO','Trekk','Brickshop'];
 function priceBlockHTML(s){
   const p = PRICES[s.n];
   if (p && p.cheapest!=null){
