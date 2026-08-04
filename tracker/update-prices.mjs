@@ -18,6 +18,7 @@ import { scrapeCoolshop } from './coolshop-adapter.mjs';
 import { scrapeBoozt, scrapeBooztlet } from './boozt-adapter.mjs';
 import { scrapeKidsworld } from './kidsworld-adapter.mjs';
 import { scrapeElko } from './elko-adapter.mjs';
+import { scrapeTrekk } from './trekk-adapter.mjs';
 
 const rel = (p) => new URL(p, import.meta.url);
 const CATALOG_PATH = rel(process.env.PRICES_CATALOG || '../index.html');
@@ -33,7 +34,7 @@ const MIN_DROP_ISK = Number(process.env.PRICES_MIN_DROP_ISK || 1000);
 const ADAPTERS = [
   ['Kubbabúðin', scrapeKubbabudin], ['Coolshop', scrapeCoolshop],
   ['Boozt', scrapeBoozt], ['Booztlet', scrapeBooztlet],
-  ['Kids-world', scrapeKidsworld], ['ELKO', scrapeElko],
+  ['Kids-world', scrapeKidsworld], ['ELKO', scrapeElko], ['Trekk', scrapeTrekk],
   ['Brickshop', scrapeBrickshop],
 ];
 
