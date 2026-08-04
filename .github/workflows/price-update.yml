@@ -1,0 +1,67 @@
+name: Brick Garage price update
+
+# Daily: scrape 7 retailers -> commit prices.json (the page reads it) AND diff against
+# the previous prices.json to detect drops/sales/restocks/all-time-lows on your watched
+# (missing) sets -> open a GitHub issue when something changes. Fully on GitHub.
+
+on:
+  schedule:
+    - cron: '0 7 * * *'         # daily 07:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write               # commit prices.json
+  issues: write                 # raise the price-drop issue
+
+concurrency:
+  group: price-update
+  cancel-in-progress: true
+
+jobs:
+  prices:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Scrape prices + detect changes
+        id: prices
+        run: node tracker/update-prices.mjs
+
+      - name: Commit prices.json
+        if: always()
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- prices.json; then
+            echo "No price changes."
+          else
+            git config user.name  "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add prices.json
+            git commit -m "Update prices ($(date -u +%Y-%m-%d))"
+            git push
+          fi
+
+      - name: Price-drop issue
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          COUNT="${{ steps.prices.outputs.alert_count }}"
+          cat price-alerts.md >> "$GITHUB_STEP_SUMMARY" || true
+          if [ "${COUNT:-0}" -gt 0 ]; then
+            gh label create price-watch --color 2DA44E --description "Price drops & sales" --force || true
+            for n in $(gh issue list --label price-watch --state open --json number --jq '.[].number'); do
+              gh issue close "$n" --comment "Superseded by a newer price update." || true
+            done
+            gh issue create --title "💸 Price drops — $(date -u +%Y-%m-%d) (${COUNT})" \
+              --label price-watch --body-file price-alerts.md
+            echo "Opened price-drop issue (${COUNT} change(s))."
+          else
+            echo "No changes to alert."
+          fi
