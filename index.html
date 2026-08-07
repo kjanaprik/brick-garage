@@ -826,19 +826,22 @@ document.getElementById('importFile').addEventListener('change',(e)=>{
 });
 
 // ---------- Cross-device sync (Cloudflare Worker + KV) ----------
-const SYNC_URL = 'https://brick-garage-sync.geiri84.workers.dev'; // Worker URL; same for every device, no per-device setup
+const SYNC_URL = 'https://brick-garage-sync.geiri84.workers.dev';
 const SYNC_TS_KEY = 'bg_sync_ts';
 let syncTimer = null;
 const syncOn = () => !!SYNC_URL;
 const syncLocalTs = () => Number(localStorage.getItem(SYNC_TS_KEY) || 0);
 const setSyncLocalTs = (v) => localStorage.setItem(SYNC_TS_KEY, String(v));
+const hasLocalData = () => SETS.some(s => (s.status && s.status !== 'missing') || s.pricePaid != null || (s.userNotes && s.userNotes.length));
 
 function collectionPayload(){
+  // NB: no updatedAt here on purpose — the Worker stamps SERVER time, so all
+  // devices are ordered by one clock (no phone/computer clock-skew problems).
   const sets = {};
   for (const s of SETS){
     sets[s.n] = { status: s.status || 'missing', pricePaid: s.pricePaid ?? null, userNotes: s.userNotes || '' };
   }
-  return { updatedAt: Date.now(), sets };
+  return { sets };
 }
 function applyCollection(data){
   if (!data || !data.sets) return false;
@@ -853,18 +856,22 @@ function applyCollection(data){
 }
 function setSyncBadge(state){
   const el = document.getElementById('syncBadge'); if (!el) return;
-  el.textContent = { syncing:'\u2601 syncing\u2026', synced:'\u2601 synced', error:'\u2601 sync error' }[state] || '';
+  el.textContent = { syncing:'\u2601 syncing\u2026', synced:'\u2601 synced', error:'\u2601 sync error' }[state] || '\u2601 synced';
   el.className = 'sync-badge ' + state;
 }
 async function syncPull(){
   if (!syncOn()) return;
-  setSyncBadge('syncing');
   try{
     const r = await fetch(SYNC_URL, { cache:'no-store' });
     if (!r.ok) throw new Error('GET '+r.status);
     const data = await r.json();
-    if ((data.updatedAt||0) > syncLocalTs()){
-      applyCollection(data); setSyncLocalTs(data.updatedAt);
+    const rts = data.updatedAt || 0;
+    if (rts === 0){                    // remote never seeded
+      if (hasLocalData()) return syncPushNow();   // seed it from this device
+      setSyncBadge('synced'); return;
+    }
+    if (rts > syncLocalTs()){
+      applyCollection(data); setSyncLocalTs(rts);
       await persist(); render(); renderTelemetry();
     }
     setSyncBadge('synced');
@@ -874,19 +881,25 @@ async function syncPushNow(){
   if (!syncOn()) return;
   setSyncBadge('syncing');
   try{
-    const payload = collectionPayload();
-    const r = await fetch(SYNC_URL, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload) });
+    const r = await fetch(SYNC_URL, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(collectionPayload()) });
     if (!r.ok) throw new Error('POST '+r.status);
-    setSyncLocalTs(payload.updatedAt); setSyncBadge('synced');
+    const res = await r.json();        // Worker returns the SERVER timestamp it stored
+    setSyncLocalTs((res && res.updatedAt) || Date.now());
+    setSyncBadge('synced');
   }catch(e){ setSyncBadge('error'); console.warn('sync push failed', e); }
 }
 function syncSchedulePush(){ if (!syncOn()) return; clearTimeout(syncTimer); syncTimer = setTimeout(syncPushNow, 1200); }
 if (syncOn()){
-  const b = document.createElement('div'); b.id = 'syncBadge'; b.className = 'sync-badge'; document.body.appendChild(b);
+  const b = document.createElement('div'); b.id = 'syncBadge'; b.className = 'sync-badge';
+  b.title = "Click to make THIS device the source of truth (push its collection to all devices)";
+  b.addEventListener('click', ()=>{ if (confirm('Make THIS device the source of truth?\\nThis overwrites the synced collection with exactly what you see here.')) syncPushNow(); });
+  document.body.appendChild(b);
   const st = document.createElement('style');
-  st.textContent = '.sync-badge{position:fixed;left:10px;bottom:10px;z-index:60;font:600 11px Saira,sans-serif;padding:4px 9px;border-radius:6px;color:var(--text-dim);background:rgba(0,0,0,.55);border:1px solid var(--border);opacity:.75}.sync-badge.synced{color:var(--available)}.sync-badge.syncing{color:var(--accent)}.sync-badge.error{color:#e5484d}.sync-badge:empty{display:none}';
+  st.textContent = '.sync-badge{position:fixed;left:10px;bottom:10px;z-index:60;font:600 11px Saira,sans-serif;padding:4px 9px;border-radius:6px;color:var(--text-dim);background:rgba(0,0,0,.55);border:1px solid var(--border);opacity:.8;cursor:pointer;user-select:none}.sync-badge:hover{opacity:1}.sync-badge.synced{color:var(--available)}.sync-badge.syncing{color:var(--accent)}.sync-badge.error{color:#e5484d}';
   document.head.appendChild(st);
   window.addEventListener('focus', syncPull);
+  document.addEventListener('visibilitychange', ()=>{ if (!document.hidden) syncPull(); });
+  setInterval(()=>{ if (!document.hidden) syncPull(); }, 20000);   // catch other devices while open
 }
 
 // ---------- Boot ----------
