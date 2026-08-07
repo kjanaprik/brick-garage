@@ -546,7 +546,8 @@ async function load(){
   }
   await persist();
 }
-async function persist(){ await sSet(KEY, JSON.stringify(SETS)); }
+let applyingRemote = false;   // true while writing server data locally (skip push to avoid echo)
+async function persist(){ await sSet(KEY, JSON.stringify(SETS)); if (!applyingRemote && typeof syncSchedulePush==='function') syncSchedulePush(); }
 
 // ---------- State ----------
 let filterStatus = 'all', filterTheme = 'all', sortMode = 'year-desc', query = '', rcOnly = false;
@@ -871,10 +872,12 @@ async function syncPull(){
       setSyncBadge('synced'); return;
     }
     if (rts > syncLocalTs()){
+      applyingRemote = true;
       applyCollection(data); setSyncLocalTs(rts);
       await persist(); render(); renderTelemetry();
+      applyingRemote = false;
     }
-    setSyncBadge('synced');
+    if (!syncDirty) setSyncBadge('synced');
   }catch(e){ setSyncBadge('error'); console.warn('sync pull failed', e); }
 }
 async function syncPushNow(){
@@ -885,10 +888,14 @@ async function syncPushNow(){
     if (!r.ok) throw new Error('POST '+r.status);
     const res = await r.json();        // Worker returns the SERVER timestamp it stored
     setSyncLocalTs((res && res.updatedAt) || Date.now());
+    syncDirty = false;
     setSyncBadge('synced');
-  }catch(e){ setSyncBadge('error'); console.warn('sync push failed', e); }
+  }catch(e){ setSyncBadge('error'); console.warn('sync push failed', e); }  // stays dirty; retries on focus
 }
-function syncSchedulePush(){ if (!syncOn()) return; clearTimeout(syncTimer); syncTimer = setTimeout(syncPushNow, 1200); }
+let syncDirty = false;
+function syncSchedulePush(){ if (!syncOn()) return; syncDirty = true; setSyncBadge('syncing'); clearTimeout(syncTimer); syncTimer = setTimeout(syncPushNow, 1200); }
+// On return to the tab: if we have unpushed local changes, push them; otherwise pull.
+function syncTick(){ if (!syncOn()) return; if (syncDirty) syncPushNow(); else syncPull(); }
 if (syncOn()){
   const b = document.createElement('div'); b.id = 'syncBadge'; b.className = 'sync-badge';
   b.title = "Click to make THIS device the source of truth (push its collection to all devices)";
@@ -897,14 +904,15 @@ if (syncOn()){
   const st = document.createElement('style');
   st.textContent = '.sync-badge{position:fixed;left:10px;bottom:10px;z-index:60;font:600 11px Saira,sans-serif;padding:4px 9px;border-radius:6px;color:var(--text-dim);background:rgba(0,0,0,.55);border:1px solid var(--border);opacity:.8;cursor:pointer;user-select:none}.sync-badge:hover{opacity:1}.sync-badge.synced{color:var(--available)}.sync-badge.syncing{color:var(--accent)}.sync-badge.error{color:#e5484d}';
   document.head.appendChild(st);
-  window.addEventListener('focus', syncPull);
-  document.addEventListener('visibilitychange', ()=>{ if (!document.hidden) syncPull(); });
-  setInterval(()=>{ if (!document.hidden) syncPull(); }, 20000);   // catch other devices while open
+  window.addEventListener('focus', syncTick);
+  document.addEventListener('visibilitychange', ()=>{ if (!document.hidden) syncTick(); });
+  setInterval(()=>{ if (!document.hidden) syncTick(); }, 20000);   // catch other devices while open
+  window.addEventListener('online', syncTick);                    // came back from offline → flush
 }
 
 // ---------- Boot ----------
 (async ()=>{
-  await load(); render();
+  applyingRemote = true; await load(); render(); applyingRemote = false;
   try{
     const r = await fetch('prices.json?_='+Date.now(), {cache:'no-store'});
     if (r.ok){ const d = await r.json(); PRICES = d.sets||{}; window.PRICES_META={updated:d.updated,fx:d.fx}; render(); }
