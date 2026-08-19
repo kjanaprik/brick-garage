@@ -34,6 +34,7 @@ const ALERTS_PATH  = rel(process.env.PRICES_ALERTS || '../price-alerts.md');
 
 const SYNC_URL = process.env.BG_SYNC_URL || '';   // Worker GET endpoint; unset = skip KV pull
 const SYNC_KEY = process.env.BG_SYNC_KEY || '';   // optional auth for that endpoint
+const BRICKSET_KEY = process.env.BRICKSET_API_KEY || ''; // production-status source; unset = keep page's seed
 
 // Alert thresholds (Brickshop moves slightly with live FX, so ignore tiny drifts).
 const MIN_DROP_PCT = Number(process.env.PRICES_MIN_DROP_PCT || 0.05); // 5%
@@ -89,6 +90,41 @@ async function kvAddedSets() {
   } catch (err) { console.error(`[prices] KV pull failed: ${err.message}`); return []; }
 }
 
+// Fetch production status (available/retired) from Brickset for the tracked SKUs in a
+// single batched getSets call. A set is 'retired' once its exitDate is in the past;
+// forthcoming sets (released === false) count as 'available'. Returns { sku: status }.
+// Never throws — on any failure returns {} and the caller keeps the previous values.
+async function bricksetProd(skus) {
+  if (!BRICKSET_KEY) return {};
+  try {
+    const setNumber = skus.map((n) => `${n}-1`).join(',');   // Brickset wants {number}-{variant}
+    const params = JSON.stringify({ setNumber, pageSize: 500 });
+    const body = new URLSearchParams({ apiKey: BRICKSET_KEY, params });
+    const res = await fetch('https://brickset.com/api/v3.asmx/getSets', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body,
+    });
+    if (!res.ok) { console.error(`[prices] Brickset HTTP ${res.status}`); return {}; }
+    const data = await res.json();
+    if (data.status !== 'success') { console.error(`[prices] Brickset: ${data.message || 'error'}`); return {}; }
+    const now = Date.now();
+    const out = {};
+    for (const s of data.sets || []) {
+      const n = String(s.number);
+      let prod = 'available';
+      if (s.released === false) prod = 'available';               // not out yet → treat as available
+      else if (s.exitDate) {
+        const t = Date.parse(s.exitDate);
+        if (!Number.isNaN(t) && t < now) prod = 'retired';        // left production → retired
+      }
+      out[n] = prod;
+    }
+    console.error(`[prices] Brickset prod resolved for ${Object.keys(out).length}/${skus.length} sets`);
+    return out;
+  } catch (err) { console.error(`[prices] Brickset failed: ${err.message}`); return {}; }
+}
+
 async function main() {
   const cat = await catalog();
   const nameOf = Object.fromEntries(cat.map((e) => [String(e.n), e.name]));
@@ -106,6 +142,11 @@ async function main() {
   const skus = [...new Set([...cat.map((e) => String(e.n)), ...added.map((s) => s.n)])]
     .filter((s) => !ignore.has(s));
   console.error(`[prices] tracking ${skus.length} sets; watching ${watch ? watch.size : 'all'}`);
+
+  // Production status from Brickset (merged over the last run so a transient API
+  // failure never wipes it). Empty when BRICKSET_API_KEY is unset — page keeps its seed.
+  const prevProd = (await readJson(OUT_PATH, {})).prod || {};
+  const prodMap = { ...prevProd, ...(await bricksetProd(skus)) };
 
   const t0 = Date.now();
   const results = await Promise.all(ADAPTERS.map(async ([label, fn]) => {
@@ -163,7 +204,7 @@ async function main() {
     if (kind) alerts.push({ n, name: nameOf[n] || n, kind, now: e.cheapest, prev: prevCheap, shop: e.shop, url: e.url, pct: Math.round(dropPct * 100), low: e.low });
   }
 
-  const out = { updated: new Date().toISOString(), fx, count: Object.keys(sets).length, sets };
+  const out = { updated: new Date().toISOString(), fx, count: Object.keys(sets).length, prod: prodMap, sets };
   await writeFile(OUT_PATH, JSON.stringify(out));
 
   // ---- alert report ----
