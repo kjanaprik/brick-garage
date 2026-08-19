@@ -99,7 +99,7 @@ async function bricksetProd(skus) {
   try {
     const setNumber = skus.map((n) => `${n}-1`).join(',');   // Brickset wants {number}-{variant}
     const params = JSON.stringify({ setNumber, pageSize: 500 });
-    const body = new URLSearchParams({ apiKey: BRICKSET_KEY, params });
+    const body = new URLSearchParams({ apiKey: BRICKSET_KEY, userHash: '', params });
     const res = await fetch('https://brickset.com/api/v3.asmx/getSets', {
       method: 'POST',
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
