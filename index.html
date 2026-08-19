@@ -506,6 +506,14 @@ async function sSet(k,v){
 
 let SETS = []; // working array
 
+// Tombstones: SKUs of custom sets the user has removed. Travels in the sync
+// blob so a delete on one device propagates instead of being resurrected by
+// another device that still holds a local copy.
+const DEL_KEY = 'bg_deleted';
+function loadDeleted(){ try { return new Set(JSON.parse(localStorage.getItem(DEL_KEY) || '[]')); } catch { return new Set(); } }
+function saveDeleted(){ try { localStorage.setItem(DEL_KEY, JSON.stringify([...DELETED])); } catch {} }
+let DELETED = loadDeleted();
+
 // F1-related sets excluded from this collection (purged even if previously saved)
 const EXCLUDE_F1 = ['42141','42171','10353','11375','77251','77252','77258'];
 // CONTROL+ app remote-controlled cars (motorized RC out of the box)
@@ -525,6 +533,7 @@ async function load(){
     CATALOG.forEach(c=>{ if(!have.has(c.n)) SETS.push(seed(c)); });
   }
   SETS = SETS.filter(s => !EXCLUDE_F1.includes(s.n));
+  SETS = SETS.filter(s => !DELETED.has(s.n));   // drop tombstoned custom sets
 
   // Apply confirmed purchases once (won't clobber later manual edits)
   const imported = await sGet(IMPORT_FLAG);
@@ -757,6 +766,7 @@ grid.addEventListener('click', async (e)=>{
   } else if (act==='del'){
     if (confirm(`Remove "${s.name}" from your garage?`)){
       SETS = SETS.filter(x=>x.n!==n);
+      DELETED.add(n); saveDeleted();
       await persist(); render();
     }
   }
@@ -889,7 +899,7 @@ document.getElementById('saveBtn').onclick=async ()=>{
     year: document.getElementById('f-year').value?Number(document.getElementById('f-year').value):null,
     pieces: document.getElementById('f-pieces').value?Number(document.getElementById('f-pieces').value):null,
     prod: document.getElementById('f-prod').value,
-    status:'owned', pricePaid:null, userNotes:'', custom:true
+    status:'missing', pricePaid:null, userNotes:'', custom:true
   };
   SETS.push(s); await persist(); closeModal(); render();
 };
@@ -934,6 +944,7 @@ function collectionPayload(){
   // devices are ordered by one clock (no phone/computer clock-skew problems).
   const sets = {};
   for (const s of SETS){
+    if (DELETED.has(s.n)) continue;   // never re-publish a tombstoned set
     const rec = { status: s.status || 'missing', pricePaid: s.pricePaid ?? null, userNotes: s.userNotes || '' };
     if (isCustomSet(s)){
       // Manually-added set (not in the baked CATALOG): carry the FULL record so
@@ -948,12 +959,21 @@ function collectionPayload(){
     }
     sets[s.n] = rec;
   }
-  return { sets };
+  return { sets, deleted: [...DELETED] };
 }
 function applyCollection(data){
   if (!data || !data.sets) return false;
+  // Merge tombstones first: union remote deletions into local, then drop those
+  // sets so a delete made on another device propagates here.
+  if (Array.isArray(data.deleted) && data.deleted.length){
+    let changed = false;
+    for (const n of data.deleted){ if (!DELETED.has(n)){ DELETED.add(n); changed = true; } }
+    if (changed) saveDeleted();
+  }
+  if (DELETED.size) SETS = SETS.filter(s => !DELETED.has(s.n));
   const map = new Map(SETS.map(s => [s.n, s]));
   for (const [n, v] of Object.entries(data.sets)){
+    if (DELETED.has(n)) continue;   // tombstoned — don't recreate or update
     let s = map.get(n);
     if (!s){
       // Not in this device's list. If the remote carries a full custom record,
