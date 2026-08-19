@@ -31,8 +31,9 @@ jobs:
       - name: Scrape prices + detect changes
         id: prices
         env:
-          BG_SYNC_URL: ${{ secrets.BG_SYNC_URL }}   # Worker GET endpoint (returns synced blob)
-          BG_SYNC_KEY: ${{ secrets.BG_SYNC_KEY }}   # only if that route needs auth; leave unset otherwise
+          BG_SYNC_URL: ${{ secrets.BG_SYNC_URL }}         # Worker GET endpoint (returns synced blob)
+          BG_SYNC_KEY: ${{ secrets.BG_SYNC_KEY }}         # only if that route needs auth; leave unset otherwise
+          BRICKSET_API_KEY: ${{ secrets.BRICKSET_API_KEY }} # production status (available/retired); unset = keep page seed
         run: node tracker/update-prices.mjs
 
       - name: Commit prices.json
