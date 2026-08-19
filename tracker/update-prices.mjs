@@ -10,6 +10,11 @@
 //   ../ignore-skus.json  sets to skip entirely
 //   ../watch-skus.json   OPTIONAL: only alert on these sets (missing list). Absent = all.
 //   ../price-alerts.md   output: the alert report (only when there are changes)
+//
+// Env (optional — set as GitHub secrets to price manually-added "+ ADD SET" sets):
+//   BG_SYNC_URL   GET endpoint of the Cloudflare Worker that returns the synced blob.
+//                 Unset -> KV pull is skipped and behaviour is identical to before.
+//   BG_SYNC_KEY   Auth token, only if your GET route requires one.
 
 import { readFile, writeFile } from 'node:fs/promises';
 import { scrapeKubbabudin } from './kubbabudin-adapter.mjs';
@@ -26,6 +31,9 @@ const OUT_PATH     = rel(process.env.PRICES_OUT || '../prices.json');
 const IGNORE_PATH  = rel(process.env.PRICES_IGNORE || '../ignore-skus.json');
 const WATCH_PATH   = rel(process.env.PRICES_WATCH || '../watch-skus.json');
 const ALERTS_PATH  = rel(process.env.PRICES_ALERTS || '../price-alerts.md');
+
+const SYNC_URL = process.env.BG_SYNC_URL || '';   // Worker GET endpoint; unset = skip KV pull
+const SYNC_KEY = process.env.BG_SYNC_KEY || '';   // optional auth for that endpoint
 
 // Alert thresholds (Brickshop moves slightly with live FX, so ignore tiny drifts).
 const MIN_DROP_PCT = Number(process.env.PRICES_MIN_DROP_PCT || 0.05); // 5%
@@ -48,6 +56,39 @@ async function catalog() {
   return JSON.parse(m[1]);
 }
 
+// Pull user-added sets from the Cloudflare Worker (KV). These come in via the UI's
+// "+ ADD SET" and live only in the synced blob — never in CATALOG — so without this
+// they're never scraped. Returns [{ n, name }]. Shape-tolerant; never throws.
+async function kvAddedSets() {
+  if (!SYNC_URL) return [];
+  try {
+    const headers = {};
+    if (SYNC_KEY) { headers.Authorization = `Bearer ${SYNC_KEY}`; headers['X-Sync-Key'] = SYNC_KEY; }
+    const res = await fetch(SYNC_URL, { headers });
+    if (!res.ok) { console.error(`[prices] KV pull HTTP ${res.status}`); return []; }
+    const blob = await res.json();
+
+    // Accept: [ {...} ] | { sets:[...] } | { sets:{sku:{...}} } | { state:{sets:...} } | { data:... }
+    let raw = blob;
+    if (raw && !Array.isArray(raw)) raw = raw.sets ?? raw.state?.sets ?? raw.state ?? raw.data ?? raw;
+    let entries;
+    if (Array.isArray(raw)) entries = raw;
+    else if (raw && typeof raw === 'object') {
+      entries = Object.entries(raw).map(([k, v]) =>
+        v && typeof v === 'object' ? { n: v.n ?? v.num ?? v.sku ?? k, ...v } : { n: k });
+    } else entries = [];
+
+    const seen = new Set(), out = [];
+    for (const e of entries) {
+      const n = String(e?.n ?? e?.num ?? e?.sku ?? e?.set ?? e?.id ?? '').trim();
+      if (!/^\d{3,7}$/.test(n) || seen.has(n)) continue;   // real LEGO set numbers, deduped
+      seen.add(n);
+      out.push({ n, name: e?.name ?? e?.title ?? null });
+    }
+    return out;
+  } catch (err) { console.error(`[prices] KV pull failed: ${err.message}`); return []; }
+}
+
 async function main() {
   const cat = await catalog();
   const nameOf = Object.fromEntries(cat.map((e) => [String(e.n), e.name]));
@@ -56,7 +97,14 @@ async function main() {
   const watch = watchArr ? new Set(watchArr.map(String)) : null; // null = watch all
   const prev = (await readJson(OUT_PATH, {})).sets || {};
 
-  const skus = cat.map((e) => String(e.n)).filter((s) => !ignore.has(s));
+  // Fold in manually-added (KV-only) sets that aren't already in CATALOG.
+  const catSkus = new Set(cat.map((e) => String(e.n)));
+  const added = (await kvAddedSets()).filter((s) => !catSkus.has(s.n) && !ignore.has(s.n));
+  for (const s of added) if (s.name && !nameOf[s.n]) nameOf[s.n] = s.name;
+  if (added.length) console.error(`[prices] +${added.length} KV-added set(s): ${added.map((s) => s.n).join(', ')}`);
+
+  const skus = [...new Set([...cat.map((e) => String(e.n)), ...added.map((s) => s.n)])]
+    .filter((s) => !ignore.has(s));
   console.error(`[prices] tracking ${skus.length} sets; watching ${watch ? watch.size : 'all'}`);
 
   const t0 = Date.now();
