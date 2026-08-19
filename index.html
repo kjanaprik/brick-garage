@@ -404,8 +404,7 @@
   <div class="grid" id="grid"></div>
 
   <p class="foot">
-    Production status is a snapshot from mid-July 2026 and dates shift often — click the status light
-    (<span style="color:var(--available)">●</span> Available / <span style="color:var(--retired)">●</span> Retired) on any card to flip it.
+    Production status (<span style="color:var(--available)">●</span> Available / <span style="color:var(--retired)">●</span> Retired) is refreshed automatically from Brickset each day.
     Owned/wishlist choices, prices, and notes save automatically to this artifact.
     <b>Export</b> writes a JSON backup (handy for your NAS); <b>Import</b> restores one.
   </p>
@@ -659,7 +658,7 @@ function cardHTML(s){
       <div class="meta"><span class="k">Pieces</span><span class="v">${(PRICES[s.n]&&PRICES[s.n].pieces)?fmt(PRICES[s.n].pieces):(s.piecesEst?'~':'')+fmt(s.pieces)}</span></div>
       <div class="meta">
         <span class="k">Production</span>
-        <button class="prod ${s.prod}" data-act="prod"><span class="dot"></span>${s.prod==='available'?'Available':'Retired'}${s.note?`<span class="prod-note">${escapeHTML(s.note)}</span>`:''}</button>
+        <span class="prod ${s.prod}"><span class="dot"></span>${s.prod==='available'?'Available':'Retired'}${s.note?`<span class="prod-note">${escapeHTML(s.note)}</span>`:''}</span>
       </div>
     </div>
     ${priceBlockHTML(s)}
@@ -687,6 +686,8 @@ function escapeHTML(str){ return String(str).replace(/[&<>"']/g, c=>({'&':'&amp;
 
 // ---------- Live prices (from prices.json, refreshed daily by GitHub Actions) ----------
 let PRICES = {};
+let PROD_AUTO = {};   // sku -> 'available'|'retired', auto-filled from Brickset via prices.json
+function applyAutoProd(){ for (const s of SETS){ if (PROD_AUTO && PROD_AUTO[s.n]) s.prod = PROD_AUTO[s.n]; } }
 const SHOP_ORDER = ['Kubbabúðin','Coolshop','Boozt','Booztlet','Kids-world','ELKO','Trekk','Brickshop'];
 function priceBlockHTML(s){
   const p = PRICES[s.n];
@@ -733,9 +734,6 @@ grid.addEventListener('click', async (e)=>{
   if (act==='status'){
     const val = e.target.closest('[data-act]').dataset.val;
     s.status = val;
-    await persist(); render();
-  } else if (act==='prod'){
-    s.prod = s.prod==='available' ? 'retired' : 'available';
     await persist(); render();
   } else if (act==='del'){
     if (confirm(`Remove "${s.name}" from your garage?`)){
@@ -835,12 +833,27 @@ const syncLocalTs = () => Number(localStorage.getItem(SYNC_TS_KEY) || 0);
 const setSyncLocalTs = (v) => localStorage.setItem(SYNC_TS_KEY, String(v));
 const hasLocalData = () => SETS.some(s => (s.status && s.status !== 'missing') || s.pricePaid != null || (s.userNotes && s.userNotes.length));
 
+const CAT_NUMS = new Set(CATALOG.map(c => c.n));
+const isCustomSet = (s) => s.custom === true || !CAT_NUMS.has(s.n);
+
 function collectionPayload(){
   // NB: no updatedAt here on purpose — the Worker stamps SERVER time, so all
   // devices are ordered by one clock (no phone/computer clock-skew problems).
   const sets = {};
   for (const s of SETS){
-    sets[s.n] = { status: s.status || 'missing', pricePaid: s.pricePaid ?? null, userNotes: s.userNotes || '' };
+    const rec = { status: s.status || 'missing', pricePaid: s.pricePaid ?? null, userNotes: s.userNotes || '' };
+    if (isCustomSet(s)){
+      // Manually-added set (not in the baked CATALOG): carry the FULL record so
+      // other devices — which build their list from CATALOG — can recreate it.
+      rec.custom = true;
+      rec.name = s.name;
+      rec.theme = s.theme || 'Other';
+      rec.year = s.year ?? null;
+      rec.pieces = s.pieces ?? null;
+      rec.prod = s.prod || 'available';
+      if (s.note) rec.note = s.note;
+    }
+    sets[s.n] = rec;
   }
   return { sets };
 }
@@ -848,7 +861,20 @@ function applyCollection(data){
   if (!data || !data.sets) return false;
   const map = new Map(SETS.map(s => [s.n, s]));
   for (const [n, v] of Object.entries(data.sets)){
-    const s = map.get(n); if (!s) continue;
+    let s = map.get(n);
+    if (!s){
+      // Not in this device's list. If the remote carries a full custom record,
+      // recreate the set so manual adds survive on a fresh device / cleared storage.
+      if (v && v.custom && v.name){
+        s = { n, name: v.name, theme: v.theme || 'Other', year: v.year ?? null,
+              pieces: v.pieces ?? null, prod: v.prod || 'available',
+              status: 'missing', pricePaid: null, userNotes: '', custom: true };
+        if (v.note) s.note = v.note;
+        SETS.push(s); map.set(n, s);
+      } else {
+        continue; // status-only override for a set we don't have — skip
+      }
+    }
     s.status = v.status || 'missing';
     s.pricePaid = v.pricePaid ?? null;
     s.userNotes = v.userNotes || '';
@@ -873,7 +899,7 @@ async function syncPull(){
     }
     if (rts > syncLocalTs()){
       applyingRemote = true;
-      applyCollection(data); setSyncLocalTs(rts);
+      applyCollection(data); applyAutoProd(); setSyncLocalTs(rts);
       await persist(); render(); renderTelemetry();
       applyingRemote = false;
     }
@@ -915,7 +941,13 @@ if (syncOn()){
   applyingRemote = true; await load(); render(); applyingRemote = false;
   try{
     const r = await fetch('prices.json?_='+Date.now(), {cache:'no-store'});
-    if (r.ok){ const d = await r.json(); PRICES = d.sets||{}; window.PRICES_META={updated:d.updated,fx:d.fx}; render(); }
+    if (r.ok){
+      const d = await r.json();
+      PRICES = d.sets||{};
+      window.PRICES_META={updated:d.updated,fx:d.fx};
+      if (d.prod){ PROD_AUTO = d.prod; applyAutoProd(); }
+      render(); renderTelemetry();
+    }
   }catch{}
   await syncPull();
 })();
