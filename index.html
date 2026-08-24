@@ -516,6 +516,8 @@ let DELETED = loadDeleted();
 
 // F1-related sets excluded from this collection (purged even if previously saved)
 const EXCLUDE_F1 = ['42141','42171','10353','11375','77251','77252','77258'];
+// SKUs from ignore-skus.json — populated at boot before load(); hidden everywhere, even if saved/synced
+let IGNORE_SKUS = new Set();
 // CONTROL+ app remote-controlled cars (motorized RC out of the box)
 const RC_SETS = new Set(['42176','42160','42214','42239']);
 
@@ -533,6 +535,7 @@ async function load(){
     CATALOG.forEach(c=>{ if(!have.has(c.n)) SETS.push(seed(c)); });
   }
   SETS = SETS.filter(s => !EXCLUDE_F1.includes(s.n));
+  SETS = SETS.filter(s => !IGNORE_SKUS.has(String(s.n)));   // drop ignore-skus.json entries
   SETS = SETS.filter(s => !DELETED.has(s.n));   // drop tombstoned custom sets
 
   // Apply confirmed purchases once (won't clobber later manual edits)
@@ -920,7 +923,7 @@ document.getElementById('importFile').addEventListener('change',(e)=>{
     try{
       const data=JSON.parse(r.result);
       if(!Array.isArray(data)) throw new Error('bad');
-      SETS=data; await persist(); render();
+      SETS=data.filter(s => !IGNORE_SKUS.has(String(s.n))); await persist(); render();
     }catch{ alert("That file doesn't look like a Brick Garage backup."); }
     e.target.value='';
   };
@@ -971,6 +974,7 @@ function applyCollection(data){
     if (changed) saveDeleted();
   }
   if (DELETED.size) SETS = SETS.filter(s => !DELETED.has(s.n));
+  if (IGNORE_SKUS.size) SETS = SETS.filter(s => !IGNORE_SKUS.has(String(s.n)));
   const map = new Map(SETS.map(s => [s.n, s]));
   for (const [n, v] of Object.entries(data.sets)){
     if (DELETED.has(n)) continue;   // tombstoned — don't recreate or update
@@ -1051,6 +1055,10 @@ if (syncOn()){
 
 // ---------- Boot ----------
 (async ()=>{
+  try{
+    const ig = await fetch('ignore-skus.json?_='+Date.now(), {cache:'no-store'});
+    if (ig.ok){ const arr = await ig.json(); if (Array.isArray(arr)) IGNORE_SKUS = new Set(arr.map(String)); }
+  }catch{}
   applyingRemote = true; await load(); render(); applyingRemote = false;
   try{
     const r = await fetch('prices.json?_='+Date.now(), {cache:'no-store'});
