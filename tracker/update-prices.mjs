@@ -15,6 +15,8 @@
 //   BG_SYNC_URL   GET endpoint of the Cloudflare Worker that returns the synced blob.
 //                 Unset -> KV pull is skipped and behaviour is identical to before.
 //   BG_SYNC_KEY   Auth token, only if your GET route requires one.
+//   PRICES_CARRY_FLOOR  fraction of last run's row count below which a shop's results
+//                       are treated as a failed scrape and carried forward (default .75)
 
 import { readFile, writeFile } from 'node:fs/promises';
 import { scrapeKubbabudin } from './kubbabudin-adapter.mjs';
@@ -24,6 +26,7 @@ import { scrapeBoozt, scrapeBooztlet } from './boozt-adapter.mjs';
 import { scrapeKidsworld } from './kidsworld-adapter.mjs';
 import { scrapeElko } from './elko-adapter.mjs';
 import { scrapeTrekk } from './trekk-adapter.mjs';
+import { guardRows } from './carry-forward.mjs';
 
 const rel = (p) => new URL(p, import.meta.url);
 const CATALOG_PATH = rel(process.env.PRICES_CATALOG || '../index.html');
@@ -39,6 +42,10 @@ const BRICKSET_KEY = process.env.BRICKSET_API_KEY || ''; // production-status so
 // Alert thresholds (Brickshop moves slightly with live FX, so ignore tiny drifts).
 const MIN_DROP_PCT = Number(process.env.PRICES_MIN_DROP_PCT || 0.05); // 5%
 const MIN_DROP_ISK = Number(process.env.PRICES_MIN_DROP_ISK || 1000);
+
+// A shop returning fewer than this fraction of last run's rows is treated as a
+// failed scrape, not as the retailer having dropped the stock.
+const CARRY_FLOOR = Number(process.env.PRICES_CARRY_FLOOR || 0.75);
 
 const ADAPTERS = [
   ['Kubbabúðin', scrapeKubbabudin], ['Coolshop', scrapeCoolshop],
@@ -131,7 +138,11 @@ async function main() {
   const ignore = new Set((await readJson(IGNORE_PATH, [])).map(String));
   const watchArr = await readJson(WATCH_PATH, null);
   const watch = watchArr ? new Set(watchArr.map(String)) : null; // null = watch all
-  const prev = (await readJson(OUT_PATH, {})).sets || {};
+
+  // Previous run: read once and reuse for history, production status and FX fallback.
+  const prevAll = await readJson(OUT_PATH, {});
+  const prev = prevAll.sets || {};
+  const prevUpdated = prevAll.updated || null;
 
   // Fold in manually-added (KV-only) sets that aren't already in CATALOG.
   const catSkus = new Set(cat.map((e) => String(e.n)));
@@ -145,13 +156,23 @@ async function main() {
 
   // Production status from Brickset (merged over the last run so a transient API
   // failure never wipes it). Empty when BRICKSET_API_KEY is unset — page keeps its seed.
-  const prevProd = (await readJson(OUT_PATH, {})).prod || {};
-  const prodMap = { ...prevProd, ...(await bricksetProd(skus)) };
+  const prodMap = { ...(prevAll.prod || {}), ...(await bricksetProd(skus)) };
 
   const t0 = Date.now();
+  let carriedTotal = 0;
   const results = await Promise.all(ADAPTERS.map(async ([label, fn]) => {
-    try { const rows = await fn(skus); console.error(`  ${label}: ${rows.length}`); return [label, rows]; }
-    catch (e) { console.error(`  ${label} FAILED: ${e.message}`); return [label, []]; }
+    let rows = [], failed = false;
+    try {
+      rows = await fn(skus);
+      console.error(`  ${label}: ${rows.length}`);
+    } catch (e) {
+      console.error(`  ${label} FAILED: ${e.message}`);
+      failed = true;
+    }
+    // A blocked or throttled scrape must not read as "retailer dropped the set".
+    const g = guardRows({ label, rows, prevSets: prev, since: prevUpdated, floor: CARRY_FLOOR, failed });
+    carriedTotal += g.carried;
+    return [label, g.rows];
   }));
 
   const sets = {}; let fx = null;
@@ -162,9 +183,12 @@ async function main() {
       p: r.price_isk, sale: !!r.on_sale, was: r.rrp_isk ?? null,
       stock: r.in_stock !== false, url: r.url || null,
       ...(label === 'Brickshop' && r.bundled_isk != null ? { bundled: r.bundled_isk } : {}),
+      ...(r.stale ? { stale: true, since: r.stale_since || null } : {}),
     };
     if (r.pieces && !e.pieces) e.pieces = r.pieces;   // real piece count (from Brickshop spec table)
   }
+  // If Brickshop was carried forward there's no live rate in this run — keep the last one.
+  if (fx == null && prevAll.fx != null) fx = prevAll.fx;
 
   const alerts = [];
   const today = new Date().toISOString().slice(0, 10);
@@ -172,7 +196,7 @@ async function main() {
     let best = null;
     for (const [shop, d] of Object.entries(e.shops)) {
       if (d.p == null || !d.stock) continue;
-      if (!best || d.p < best.p) best = { p: d.p, shop, url: d.url, sale: d.sale };
+      if (!best || d.p < best.p) best = { p: d.p, shop, url: d.url, sale: d.sale, stale: !!d.stale };
     }
     e.cheapest = best ? best.p : null;
     e.shop = best ? best.shop : null;
@@ -188,6 +212,7 @@ async function main() {
     // ---- alert logic (only for watched sets, and only on a real change) ----
     if (watch && !watch.has(n)) continue;
     if (e.cheapest == null) continue;
+    if (best?.stale) continue;   // don't raise an alert off a value we didn't actually re-scrape
     const prevCheap = pv.cheapest ?? null;
     const isNewLow = pv.low != null && e.cheapest < pv.low;               // beat the old record
     const isRestock = prevCheap == null;                                  // had nothing before
@@ -225,7 +250,11 @@ async function main() {
     md = `# 💸 Brick Garage price watch — ${today}\n\nNo price drops or new sales on your watched sets today.\n`;
   }
   await writeFile(ALERTS_PATH, md);
-  console.error(`[prices] ${out.count} sets, ${alerts.length} alert(s), in ${((Date.now() - t0) / 1000).toFixed(0)}s`);
+  console.error(
+    `[prices] ${out.count} sets, ${alerts.length} alert(s)` +
+      (carriedTotal ? `, ${carriedTotal} row(s) carried forward` : '') +
+      `, in ${((Date.now() - t0) / 1000).toFixed(0)}s`
+  );
   if (process.env.GITHUB_OUTPUT) await writeFile(process.env.GITHUB_OUTPUT, `alert_count=${alerts.length}\n`, { flag: 'a' });
 }
 
