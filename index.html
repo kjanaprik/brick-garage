@@ -369,6 +369,9 @@
   .pr-go { color: var(--text-faint); font-size: 10px; flex-shrink: 0; }
   .pr-row.oos { opacity: .45; }
   .pr-row.oos .pr-val::after { content: ' · OOS'; font-size: 9.5px; color: var(--text-faint); }
+  .pr-row.stale { opacity: .55; }
+  .pr-stale { font-size: 9.5px; color: var(--text-faint); font-style: italic; }
+  .pb-stale { font-size: 9.5px; color: var(--text-faint); font-style: italic; }
 </style>
 
 <div class="wrap">
@@ -720,21 +723,34 @@ let PRICES = {};
 let PROD_AUTO = {};   // sku -> 'available'|'retired', auto-filled from Brickset via prices.json
 function applyAutoProd(){ for (const s of SETS){ if (PROD_AUTO && PROD_AUTO[s.n]) s.prod = PROD_AUTO[s.n]; } }
 const SHOP_ORDER = ['Kubbabúðin','Coolshop','Boozt','Booztlet','Kids-world','ELKO','Trekk','Brickshop'];
+// Rows carried over from an earlier run (a retailer's scrape failed or was throttled)
+// are flagged `stale` by update-prices.mjs. Show when the price was actually seen
+// rather than letting a days-old figure read as today's.
+function staleDate(since){
+  if (!since) return '';
+  const d = new Date(since);
+  return isNaN(d) ? '' : d.toLocaleDateString('is-IS', { day: 'numeric', month: 'short' });
+}
 function priceBlockHTML(s){
   const p = PRICES[s.n];
   if (p && p.cheapest!=null){
     const rows = SHOP_ORDER.filter(sh=>p.shops[sh] && p.shops[sh].p!=null).map(sh=>{
       const d = p.shops[sh];
-      const cls = (d.p===p.cheapest && d.stock) ? 'best' : (!d.stock ? 'oos' : '');
+      const cls = [(d.p===p.cheapest && d.stock) ? 'best' : (!d.stock ? 'oos' : ''), d.stale ? 'stale' : ''].filter(Boolean).join(' ');
       const was = d.sale && d.was ? ` <span class="pr-was">${fmt(d.was)}</span>` : '';
       const bundled = (sh==='Brickshop' && d.bundled && d.bundled!==d.p) ? `<span class="pr-bundled">${fmt(d.bundled)} bundled</span>` : '';
-      const inner = `<span class="pr-shop">${sh}</span><span class="pr-nums"><span class="pr-val ${d.sale?'sale':''}">${fmt(d.p)} kr${was}</span>${bundled}</span>`;
+      const sd = d.stale ? staleDate(d.since) : '';
+      const stale = d.stale ? `<span class="pr-stale"> · ${sd || 'ekki uppfært'}</span>` : '';
+      const tip = d.stale ? ` title="Verð frá ${sd || 'fyrri keyrslu'} — náðist ekki að uppfæra í dag"` : '';
+      const inner = `<span class="pr-shop">${sh}${stale}</span><span class="pr-nums"><span class="pr-val ${d.sale?'sale':''}">${fmt(d.p)} kr${was}</span>${bundled}</span>`;
       return d.url
-        ? `<a class="pr-row ${cls}" href="${d.url}" target="_blank" rel="noopener">${inner}<span class="pr-go">↗</span></a>`
-        : `<div class="pr-row ${cls}">${inner}</div>`;
+        ? `<a class="pr-row ${cls}" href="${d.url}" target="_blank" rel="noopener"${tip}>${inner}<span class="pr-go">↗</span></a>`
+        : `<div class="pr-row ${cls}"${tip}>${inner}</div>`;
     }).join('');
+    const best = p.shops[p.shop];
+    const bestStale = best && best.stale ? `<span class="pb-stale"> · ${staleDate(best.since) || 'ekki uppfært'}</span>` : '';
     return `<details class="price-box">
-      <summary><span class="pb-lead">Cheapest</span><span class="pb-price ${p.on_sale?'sale':''}">${fmt(p.cheapest)} kr</span><span class="pb-shop">${p.shop}${p.on_sale?' · sale':''}</span></summary>
+      <summary><span class="pb-lead">Cheapest</span><span class="pb-price ${p.on_sale?'sale':''}">${fmt(p.cheapest)} kr</span><span class="pb-shop">${p.shop}${p.on_sale?' · sale':''}${bestStale}</span></summary>
       <div class="pr-list">${rows}</div></details>`;
   }
   // fallback: static Brickshop estimate until prices.json is available
