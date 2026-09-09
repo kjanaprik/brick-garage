@@ -179,6 +179,7 @@
     padding: 9px 15px; border-radius: 8px; cursor: pointer;
   }
   button.action:hover { filter: brightness(1.08); }
+  .chip.buy-toggle svg { width: 13px; height: 13px; margin-right: 5px; vertical-align: -2px; }
   button.ghost {
     background: transparent; border: 1px solid var(--border); color: var(--text-dim);
     font-family: 'Saira Condensed', sans-serif; text-transform: uppercase; letter-spacing: 0.6px;
@@ -394,6 +395,7 @@
       <button class="chip" data-status="wishlist">Wishlist</button>
       <button class="chip" data-status="missing">Missing</button>
     </div>
+    <button class="chip buy-toggle" id="buyToggle" title="Show only sets currently in stock at one of the tracked retailers"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2 3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z"/><path d="M3 6h18"/><path d="M16 10a4 4 0 0 1-8 0"/></svg>Buyable</button>
     <button class="chip rc-toggle" id="rcToggle" title="Show only CONTROL+ remote-controlled cars"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L4.5 13.5H11l-1 8L19.5 10H13z"/></svg>RC only</button>
     <select class="ctl" id="themeFilter">
       <option value="all">All themes</option>
@@ -583,7 +585,7 @@ let applyingRemote = false;   // true while writing server data locally (skip pu
 async function persist(){ await sSet(KEY, JSON.stringify(SETS)); if (!applyingRemote && typeof syncSchedulePush==='function') syncSchedulePush(); }
 
 // ---------- State ----------
-let filterStatus = 'all', filterTheme = 'all', sortMode = 'year-desc', query = '', rcOnly = false;
+let filterStatus = 'all', filterTheme = 'all', sortMode = 'year-desc', query = '', rcOnly = false, buyableOnly = false;
 
 // ---------- Render ----------
 const grid = document.getElementById('grid');
@@ -626,7 +628,16 @@ function renderThemeBar(){
   }).join('');
 }
 
+// "Buyable" = at least one tracked retailer currently has it in stock with a price.
+// Frozen entries (owned sets, no longer scraped) don't count as buyable.
+function isBuyable(s){
+  const p = PRICES[s.n];
+  if (!p || p.frozen || p.cheapest == null) return false;
+  return Object.values(p.shops || {}).some(d => d.p != null && d.stock);
+}
+
 function passes(s){
+  if (buyableOnly && !isBuyable(s)) return false;
   if (rcOnly && !RC_SETS.has(s.n)) return false;
   if (filterStatus!=='all' && s.status!==filterStatus) return false;
   if (filterTheme!=='all' && s.theme!==filterTheme) return false;
@@ -823,6 +834,12 @@ document.getElementById('search').addEventListener('input',e=>{ query=e.target.v
 document.getElementById('rcToggle').addEventListener('click',(e)=>{
   rcOnly = !rcOnly;
   e.currentTarget.classList.toggle('active', rcOnly);
+  render();
+});
+
+document.getElementById('buyToggle').addEventListener('click',(e)=>{
+  buyableOnly = !buyableOnly;
+  e.currentTarget.classList.toggle('active', buyableOnly);
   render();
 });
 
