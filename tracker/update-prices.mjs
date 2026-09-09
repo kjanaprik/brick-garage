@@ -163,7 +163,9 @@ async function main() {
   const results = await Promise.all(ADAPTERS.map(async ([label, fn]) => {
     let rows = [], failed = false;
     try {
-      rows = await fn(skus);
+      // nameOf is passed as a second arg for adapters that can fall back to a
+      // name search (Boozt/Booztlet). Others ignore it.
+      rows = await fn(skus, nameOf);
       console.error(`  ${label}: ${rows.length}`);
     } catch (e) {
       console.error(`  ${label} FAILED: ${e.message}`);

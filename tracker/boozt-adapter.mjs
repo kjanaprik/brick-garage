@@ -15,15 +15,15 @@ const UA =
 
 // update-prices.mjs runs all adapters in parallel, so the boozt and booztlet
 // loops hit the same backend at once. Jitter keeps them from marching in step.
-const REQ_DELAY = 700;   // ms between SKUs (+ up to 400ms jitter)
-const REQ_JITTER = 400;
+const REQ_DELAY = 1200;  // ms between SKUs (+ up to 600ms jitter)
+const REQ_JITTER = 600;
 const MAX_TRIES = 3;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 class FetchFailure extends Error {}
 
-async function getText(url) {
+async function getProducts(url) {
   let last;
   for (let i = 0; i < MAX_TRIES; i++) {
     try {
@@ -35,11 +35,17 @@ async function getText(url) {
         },
       });
       if (!res.ok) throw new FetchFailure(`HTTP ${res.status}`);
-      return await res.text();
+      const html = await res.text();
+      const products = extractProducts(html);
+      // HTTP 200 with no products array = soft block / challenge page. Retry it
+      // rather than recording a false "not stocked".
+      if (products === null) {
+        throw new FetchFailure(`no products array (${html.length} bytes)`);
+      }
+      return products;
     } catch (e) {
       last = e;
       if (i < MAX_TRIES - 1) {
-        // 1.5s, 3s (+ up to 500ms jitter so retries don't align across SKUs)
         await sleep(1500 * 2 ** i + Math.random() * 500);
       }
     }
@@ -47,12 +53,13 @@ async function getText(url) {
   throw new FetchFailure(last?.message || 'fetch failed');
 }
 
-// Pull the server-rendered "products":[...] array out of the search page.
-// Brace/bracket matching rather than regex, because product copy contains
-// both quotes and brackets.
+// Returns an array of products, or NULL when the page contains no products array
+// at all. Null means "this was not a search-results page" — a soft bot-block, a
+// challenge interstitial or a truncated response, all of which arrive as HTTP 200.
+// An empty array is a genuine zero-result search.
 function extractProducts(html) {
   const anchor = html.indexOf('"products":[');
-  if (anchor < 0) return [];
+  if (anchor < 0) return null;
   const start = html.indexOf('[', anchor);
   let depth = 0;
   let i = start;
@@ -73,7 +80,7 @@ function extractProducts(html) {
   try {
     return JSON.parse(html.slice(start, i));
   } catch {
-    return [];
+    return null;   // anchor present but unparseable — treat as a bad response
   }
 }
 
@@ -84,10 +91,29 @@ function toInt(v) {
 }
 
 // The LEGO set number is the last 4-6 digit run in the product name.
+// Reliable for most Boozt products ("Icons Ford Model T Model Car Kit 11376")
+// but NOT all — e.g. 42236 is listed as "Custom Garage Ford Mustang GT Car".
 function trailingSetNo(name) {
   const all = String(name || '').match(/\d{4,6}/g);
   return all ? all[all.length - 1] : null;
 }
+
+// Second identity signal: Boozt's URL slug carries the set number even when the
+// product name doesn't — /is/is/lego/technic-42236-42236_33059638.
+// The trailing _<productId> is stripped first so its digits can't cause a match.
+function urlHasSku(url, sku) {
+  const slug = String(url || '').split('/').pop().replace(/_\d+$/, '');
+  return new RegExp(`(?<![0-9])${sku}(?![0-9])`).test(slug);
+}
+
+// A product is the set we asked for if it's LEGO and either identity signal agrees.
+function isMatch(o, sku) {
+  if (String(o.brand_name || '').toUpperCase() !== 'LEGO') return false;
+  return trailingSetNo(o.product_name) === sku || urlHasSku(o.product_url, sku);
+}
+
+const searchUrl = (host, q) =>
+  `https://www.${host}/is/is/search/result?search_key=${encodeURIComponent(q)}`;
 
 function normalise(retailer, o, sku) {
   const p = o.prices || {};
@@ -124,26 +150,34 @@ function normalise(retailer, o, sku) {
 }
 
 function makeScraper(retailer, host) {
-  return async function scrape(skus = []) {
+  return async function scrape(skus = [], names = null) {
     const wanted = [...new Set((skus || []).map((s) => String(s).trim()).filter(Boolean))];
     const out = [];
-    const stats = { requested: wanted.length, hit: 0, miss: 0, error: 0, errorSkus: [] };
+    const stats = { requested: wanted.length, hit: 0, byName: 0, miss: 0, error: 0, errorSkus: [] };
 
     for (const sku of wanted) {
-      const url = `https://www.${host}/is/is/search/result?search_key=${encodeURIComponent(sku)}`;
       try {
-        const html = await getText(url);
-        const products = extractProducts(html);
-        const hit = products.find(
-          (o) =>
-            trailingSetNo(o.product_name) === sku &&
-            String(o.brand_name || '').toUpperCase() === 'LEGO'
-        );
+        // Stage 1 — search by set number. Works whenever Boozt put the number in
+        // the product name, which is most but not all of the catalogue.
+        let products = await getProducts(searchUrl(host, sku));
+        let hit = products.find((o) => isMatch(o, sku));
+
+        // Stage 2 — fall back to the set's name. Boozt indexes on product_name, so
+        // a set named without its number ("Custom Garage Ford Mustang GT Car") is
+        // unreachable by number and only findable this way. The URL-slug check in
+        // isMatch is what confirms identity, since the name carries no number.
+        if (!hit && names && names[sku]) {
+          await sleep(REQ_DELAY + Math.random() * REQ_JITTER);
+          products = await getProducts(searchUrl(host, names[sku]));
+          hit = products.find((o) => isMatch(o, sku));
+          if (hit) stats.byName++;
+        }
+
         if (hit) {
           out.push(normalise(retailer, hit, sku));
           stats.hit++;
         } else {
-          // Real negative: page loaded, no LEGO product with that set number.
+          // Real negative: pages loaded, no LEGO product matching this set.
           stats.miss++;
         }
       } catch (e) {
@@ -156,8 +190,8 @@ function makeScraper(retailer, host) {
     }
 
     console.log(
-      `[${retailer}] ${stats.hit} hit / ${stats.miss} miss / ${stats.error} error ` +
-        `of ${stats.requested}` +
+      `[${retailer}] ${stats.hit} hit (${stats.byName} via name) / ${stats.miss} miss / ` +
+        `${stats.error} error of ${stats.requested}` +
         (stats.error ? ` — failed: ${stats.errorSkus.join(',')}` : '')
     );
 
@@ -172,8 +206,15 @@ export default { scrapeBoozt, scrapeBooztlet };
 
 // CLI: node boozt-adapter.mjs [boozt|booztlet] <sku> [sku...]
 if (import.meta.url === `file://${process.argv[1]}`) {
-  const [which, ...skus] = process.argv.slice(2);
+  // node boozt-adapter.mjs boozt 42236="Custom Garage Ford Mustang GT Car" 11376
+  const [which, ...args] = process.argv.slice(2);
   const fn = which === 'booztlet' ? scrapeBooztlet : scrapeBoozt;
-  const rows = await fn(skus);
+  const skus = [], names = {};
+  for (const a of args) {
+    const [n, nm] = a.split('=');
+    skus.push(n);
+    if (nm) names[n] = nm;
+  }
+  const rows = await fn(skus, names);
   console.log(JSON.stringify(rows, null, 2));
 }
