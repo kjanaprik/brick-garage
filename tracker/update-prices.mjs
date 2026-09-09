@@ -64,16 +64,19 @@ async function catalog() {
   return JSON.parse(m[1]);
 }
 
-// Pull user-added sets from the Cloudflare Worker (KV). These come in via the UI's
-// "+ ADD SET" and live only in the synced blob — never in CATALOG — so without this
-// they're never scraped. Returns [{ n, name }]. Shape-tolerant; never throws.
-async function kvAddedSets() {
-  if (!SYNC_URL) return [];
+// Pull collection state from the Cloudflare Worker (KV).
+//   added: sets created via the UI's "+ ADD SET" — they live only in the synced
+//          blob, never in CATALOG, so without this they're never scraped.
+//   owned: sets marked Owned. There's nothing to shop for once you have it, so
+//          these are dropped from the tracked list entirely.
+// Returns { added: [{n, name}], owned: Set<string> }. Shape-tolerant; never throws.
+async function kvCollection() {
+  if (!SYNC_URL) return { added: [], owned: new Set() };
   try {
     const headers = {};
     if (SYNC_KEY) { headers.Authorization = `Bearer ${SYNC_KEY}`; headers['X-Sync-Key'] = SYNC_KEY; }
     const res = await fetch(SYNC_URL, { headers });
-    if (!res.ok) { console.error(`[prices] KV pull HTTP ${res.status}`); return []; }
+    if (!res.ok) { console.error(`[prices] KV pull HTTP ${res.status}`); return { added: [], owned: new Set() }; }
     const blob = await res.json();
 
     // Accept: [ {...} ] | { sets:[...] } | { sets:{sku:{...}} } | { state:{sets:...} } | { data:... }
@@ -86,15 +89,16 @@ async function kvAddedSets() {
         v && typeof v === 'object' ? { n: v.n ?? v.num ?? v.sku ?? k, ...v } : { n: k });
     } else entries = [];
 
-    const seen = new Set(), out = [];
+    const seen = new Set(), out = [], owned = new Set();
     for (const e of entries) {
       const n = String(e?.n ?? e?.num ?? e?.sku ?? e?.set ?? e?.id ?? '').trim();
       if (!/^\d{3,7}$/.test(n) || seen.has(n)) continue;   // real LEGO set numbers, deduped
       seen.add(n);
+      if (e?.status === 'owned') owned.add(n);
       out.push({ n, name: e?.name ?? e?.title ?? null });
     }
-    return out;
-  } catch (err) { console.error(`[prices] KV pull failed: ${err.message}`); return []; }
+    return { added: out, owned };
+  } catch (err) { console.error(`[prices] KV pull failed: ${err.message}`); return { added: [], owned: new Set() }; }
 }
 
 // Fetch production status (available/retired) from Brickset for the tracked SKUs in a
@@ -146,12 +150,17 @@ async function main() {
 
   // Fold in manually-added (KV-only) sets that aren't already in CATALOG.
   const catSkus = new Set(cat.map((e) => String(e.n)));
-  const added = (await kvAddedSets()).filter((s) => !catSkus.has(s.n) && !ignore.has(s.n));
+  const { added: kvAll, owned } = await kvCollection();
+  const added = kvAll.filter((s) => !catSkus.has(s.n) && !ignore.has(s.n));
   for (const s of added) if (s.name && !nameOf[s.n]) nameOf[s.n] = s.name;
   if (added.length) console.error(`[prices] +${added.length} KV-added set(s): ${added.map((s) => s.n).join(', ')}`);
 
+  // Owned sets are skipped: no reason to shop for something already on the shelf.
+  // Their previous rows are preserved verbatim below so all-time-low history and
+  // the card's price block survive rather than being wiped.
   const skus = [...new Set([...cat.map((e) => String(e.n)), ...added.map((s) => s.n)])]
-    .filter((s) => !ignore.has(s));
+    .filter((s) => !ignore.has(s) && !owned.has(s));
+  if (owned.size) console.error(`[prices] skipping ${owned.size} owned set(s)`);
   console.error(`[prices] tracking ${skus.length} sets; watching ${watch ? watch.size : 'all'}`);
 
   // Production status from Brickset (merged over the last run so a transient API
@@ -172,7 +181,7 @@ async function main() {
       failed = true;
     }
     // A blocked or throttled scrape must not read as "retailer dropped the set".
-    const g = guardRows({ label, rows, prevSets: prev, since: prevUpdated, floor: CARRY_FLOOR, failed });
+    const g = guardRows({ label, rows, prevSets: prev, since: prevUpdated, floor: CARRY_FLOOR, failed, skus });
     carriedTotal += g.carried;
     return [label, g.rows];
   }));
@@ -191,6 +200,11 @@ async function main() {
   }
   // If Brickshop was carried forward there's no live rate in this run — keep the last one.
   if (fx == null && prevAll.fx != null) fx = prevAll.fx;
+
+  // Preserve what we last knew about owned sets — frozen, never alerted on.
+  for (const n of owned) {
+    if (prev[n] && !sets[n]) sets[n] = { ...prev[n], owned: true, frozen: true };
+  }
 
   const alerts = [];
   const today = new Date().toISOString().slice(0, 10);
@@ -212,6 +226,7 @@ async function main() {
     if (e.cheapest != null && (e.low == null || e.cheapest < e.low)) { e.low = e.cheapest; e.low_date = today; }
 
     // ---- alert logic (only for watched sets, and only on a real change) ----
+    if (e.frozen) continue;            // owned: not re-scraped, nothing to alert
     if (watch && !watch.has(n)) continue;
     if (e.cheapest == null) continue;
     if (best?.stale) continue;   // don't raise an alert off a value we didn't actually re-scrape

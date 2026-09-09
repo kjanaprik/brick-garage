@@ -47,9 +47,14 @@ export function prevRowsFor(prevSets, label, since = null) {
  *
  * @returns {{rows: Array, carried: number}}  carried = how many rows came from history
  */
-export function guardRows({ label, rows, prevSets, since = null, floor = 0.75, failed = false }) {
+export function guardRows({ label, rows, prevSets, since = null, floor = 0.75, failed = false, skus = null }) {
   const stats = rows?.stats;
-  const prev = prevRowsFor(prevSets, label, since);
+  // Only compare against sets we're still tracking. Without this, dropping sets
+  // from the tracked list (e.g. marking them Owned) looks like a collapsed scrape
+  // and trips the floor for every retailer at once.
+  const tracked = skus ? new Set(skus.map(String)) : null;
+  const prev = prevRowsFor(prevSets, label, since)
+    .filter((r) => !tracked || tracked.has(String(r.sku)));
 
   // Nothing to compare against — first run, or a newly added retailer.
   if (!prev.length) return { rows: rows || [], carried: 0 };
