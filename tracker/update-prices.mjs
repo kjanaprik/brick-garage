@@ -26,6 +26,7 @@ import { scrapeBoozt, scrapeBooztlet } from './boozt-adapter.mjs';
 import { scrapeKidsworld } from './kidsworld-adapter.mjs';
 import { scrapeElko } from './elko-adapter.mjs';
 import { scrapeTrekk } from './trekk-adapter.mjs';
+import { scrapeBricklink } from './bricklink-adapter.mjs';
 import { guardRows } from './carry-forward.mjs';
 
 const rel = (p) => new URL(p, import.meta.url);
@@ -34,6 +35,9 @@ const OUT_PATH     = rel(process.env.PRICES_OUT || '../prices.json');
 const IGNORE_PATH  = rel(process.env.PRICES_IGNORE || '../ignore-skus.json');
 const WATCH_PATH   = rel(process.env.PRICES_WATCH || '../watch-skus.json');
 const ALERTS_PATH  = rel(process.env.PRICES_ALERTS || '../price-alerts.md');
+const BL_IDS_PATH  = rel(process.env.PRICES_BL_IDS || '../bricklink-ids.json');
+// Set PRICES_SKIP_BRICKLINK=1 to skip the marketplace pass entirely.
+const SKIP_BL = process.env.PRICES_SKIP_BRICKLINK === '1';
 
 const SYNC_URL = process.env.BG_SYNC_URL || '';   // Worker GET endpoint; unset = skip KV pull
 const SYNC_KEY = process.env.BG_SYNC_KEY || '';   // optional auth for that endpoint
@@ -186,6 +190,40 @@ async function main() {
     return [label, g.rows];
   }));
 
+  // BrickLink runs separately from the retailer adapters: it's a marketplace, its
+  // prices exclude shipping/VSK/handling, and it lands in its own block rather than
+  // in `shops` so nothing can accidentally compare it against a landed retail price.
+  let bricklink = {}, fxUsd = null;
+  if (!SKIP_BL) {
+    try {
+      const bl = await scrapeBricklink(skus, { cachePath: BL_IDS_PATH });
+      fxUsd = bl.fx_usd ?? null;
+      const prevBl = prevAll.bricklink || {};
+      const freshCount = Object.keys(bl).length;
+      const prevCount = Object.keys(prevBl).filter((k) => skus.includes(k)).length;
+      // Same reasoning as the shop guard: a degraded marketplace pass shouldn't
+      // erase what we knew. Marked stale so the panel can say so.
+      if (prevCount && freshCount < prevCount * CARRY_FLOOR) {
+        console.error(`  BrickLink: ${freshCount} vs ${prevCount} last run — carrying forward`);
+        bricklink = Object.fromEntries(
+          Object.entries(prevBl).map(([k, v]) => [k, { ...v, stale: true }])
+        );
+      } else {
+        bricklink = { ...prevBl, ...bl };   // keep entries for sets not re-checked
+        for (const k of Object.keys(bl)) delete bricklink[k].stale;
+      }
+    } catch (e) {
+      console.error(`  BrickLink FAILED: ${e.message}`);
+      bricklink = Object.fromEntries(
+        Object.entries(prevAll.bricklink || {}).map(([k, v]) => [k, { ...v, stale: true }])
+      );
+      fxUsd = prevAll.fx_usd ?? null;
+    }
+  } else {
+    bricklink = prevAll.bricklink || {};
+    fxUsd = prevAll.fx_usd ?? null;
+  }
+
   const sets = {}; let fx = null;
   for (const [label, rows] of results) for (const r of rows) {
     if (label === 'Brickshop' && r.fx_rate) fx = r.fx_rate;
@@ -246,7 +284,11 @@ async function main() {
     if (kind) alerts.push({ n, name: nameOf[n] || n, kind, now: e.cheapest, prev: prevCheap, shop: e.shop, url: e.url, pct: Math.round(dropPct * 100), low: e.low });
   }
 
-  const out = { updated: new Date().toISOString(), fx, count: Object.keys(sets).length, prod: prodMap, sets };
+  const out = {
+    updated: new Date().toISOString(), fx, fx_usd: fxUsd,
+    count: Object.keys(sets).length, prod: prodMap, sets,
+    bricklink,
+  };
   await writeFile(OUT_PATH, JSON.stringify(out));
 
   // ---- alert report ----
@@ -268,7 +310,7 @@ async function main() {
   }
   await writeFile(ALERTS_PATH, md);
   console.error(
-    `[prices] ${out.count} sets, ${alerts.length} alert(s)` +
+    `[prices] ${out.count} sets, ${Object.keys(bricklink).length} on BrickLink, ${alerts.length} alert(s)` +
       (carriedTotal ? `, ${carriedTotal} row(s) carried forward` : '') +
       `, in ${((Date.now() - t0) / 1000).toFixed(0)}s`
   );
