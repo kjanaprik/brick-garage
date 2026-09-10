@@ -1,8 +1,9 @@
 name: Brick Garage price update
 
-# Daily: scrape 7 retailers -> commit prices.json (the page reads it) AND diff against
-# the previous prices.json to detect drops/sales/restocks/all-time-lows on your watched
-# (missing) sets -> open a GitHub issue when something changes. Fully on GitHub.
+# Daily: scrape 7 retailers + BrickLink -> commit prices.json (the page reads it) AND
+# diff against the previous prices.json to detect drops/sales/restocks/all-time-lows on
+# your watched (missing) sets -> open a GitHub issue when something changes. Fully on
+# GitHub. Sets marked Owned in the synced collection are skipped entirely.
 
 on:
   schedule:
@@ -10,7 +11,7 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write               # commit prices.json
+  contents: write               # commit prices.json + bricklink-ids.json
   issues: write                 # raise the price-drop issue
 
 concurrency:
@@ -20,7 +21,10 @@ concurrency:
 jobs:
   prices:
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # Raised from 20: BrickLink adds an itemid lookup per new set plus a lot fetch per
+    # set, and Boozt now makes a second (name-based) request on every miss. The itemid
+    # cache removes most of the BrickLink cost from the second run onwards.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -31,21 +35,26 @@ jobs:
       - name: Scrape prices + detect changes
         id: prices
         env:
-          BG_SYNC_URL: ${{ secrets.BG_SYNC_URL }}         # Worker GET endpoint (returns synced blob)
+          BG_SYNC_URL: ${{ secrets.BG_SYNC_URL }}         # Worker GET endpoint (returns synced blob; also supplies Owned status)
           BG_SYNC_KEY: ${{ secrets.BG_SYNC_KEY }}         # only if that route needs auth; leave unset otherwise
           BRICKSET_API_KEY: ${{ secrets.BRICKSET_API_KEY }} # production status (available/retired); unset = keep page seed
+          # PRICES_SKIP_BRICKLINK: '1'                    # uncomment to skip the marketplace pass
         run: node tracker/update-prices.mjs
 
       - name: Commit prices.json
         if: always()
         run: |
           set -euo pipefail
-          if git diff --quiet -- prices.json; then
+          # bricklink-ids.json is the set-number -> BrickLink itemid cache. itemids are
+          # permanent, so committing it means each set is resolved once ever instead of
+          # on every run (~145 avoidable requests a day).
+          FILES="prices.json bricklink-ids.json"
+          if git diff --quiet -- $FILES; then
             echo "No price changes."
           else
             git config user.name  "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add prices.json
+            git add $FILES
             git commit -m "Update prices ($(date -u +%Y-%m-%d))"
             git push
           fi
