@@ -180,6 +180,13 @@
   }
   button.action:hover { filter: brightness(1.08); }
   .chip.buy-toggle svg { width: 13px; height: 13px; margin-right: 5px; vertical-align: -2px; }
+  .bl-box { margin-top: 8px; border: 1px solid var(--line); border-radius: 8px; background: rgba(255,255,255,.02); overflow: hidden; }
+  .bl-head { display: flex; align-items: baseline; gap: 7px; padding: 8px 11px; font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--text-faint); }
+  .bl-head .bl-price { font-size: 13px; letter-spacing: 0; text-transform: none; font-weight: 600; color: var(--accent); margin-left: auto; }
+  .bl-meta { padding: 0 11px 9px; font-size: 10.5px; color: var(--text-faint); line-height: 1.5; }
+  .bl-meta a { color: var(--text-dim); text-decoration: none; border-bottom: 1px dotted var(--line); }
+  .bl-meta .bl-note { display: block; margin-top: 4px; font-style: italic; opacity: .8; }
+  .bl-stale { font-style: italic; opacity: .7; }
   button.ghost {
     background: transparent; border: 1px solid var(--border); color: var(--text-dim);
     font-family: 'Saira Condensed', sans-serif; text-transform: uppercase; letter-spacing: 0.6px;
@@ -707,6 +714,7 @@ function cardHTML(s){
       </div>
     </div>
     ${priceBlockHTML(s)}
+    ${bricklinkBlockHTML(s)}
     <div class="seg">
       <button data-act="status" data-val="owned" ${seg('owned')}>Owned</button>
       <button data-act="status" data-val="wishlist" ${seg('wishlist')}>Wishlist</button>
@@ -732,6 +740,8 @@ function escapeHTML(str){ return String(str).replace(/[&<>"']/g, c=>({'&':'&amp;
 // ---------- Live prices (from prices.json, refreshed daily by GitHub Actions) ----------
 let PRICES = {};
 let PROD_AUTO = {};   // sku -> 'available'|'retired', auto-filled from Brickset via prices.json
+let BRICKLINK = {};   // sku -> cheapest sealed/complete EU lot that ships to Iceland
+let FX_USD = null;    // USD -> ISK, for the BrickLink panel
 function applyAutoProd(){ for (const s of SETS){ if (PROD_AUTO && PROD_AUTO[s.n]) s.prod = PROD_AUTO[s.n]; } }
 const SHOP_ORDER = ['Kubbabúðin','Coolshop','Boozt','Booztlet','Kids-world','ELKO','Trekk','Brickshop'];
 // Rows carried over from an earlier run (a retailer's scrape failed or was throttled)
@@ -742,6 +752,25 @@ function staleDate(since){
   const d = new Date(since);
   return isNaN(d) ? '' : d.toLocaleDateString('is-IS', { day: 'numeric', month: 'short' });
 }
+// Marketplace panel, deliberately separate from the retailer rows: these are
+// per-lot prices from private sellers and EXCLUDE shipping, 24% VSK and customs
+// handling, so they must not be compared directly against a landed retail price.
+function bricklinkBlockHTML(s){
+  const b = BRICKLINK[s.n];
+  if (!b || b.min_isk == null) return '';
+  const cond = b.sealed ? 'sealed' : 'complete';
+  const where = b.country_name || b.country || '';
+  const stale = b.stale ? `<span class="bl-stale"> · ${staleDate(b.scraped_at) || 'ekki uppfært'}</span>` : '';
+  const others = b.lots > 1 ? ` · ${b.lots} lots in Europe` : '';
+  return `<div class="bl-box">
+    <div class="bl-head">BrickLink${stale}<span class="bl-price">${fmt(b.min_isk)} kr</span></div>
+    <div class="bl-meta">
+      ${cond}${where ? ' · ' + where : ''}${others}<br>
+      ${b.seller ? `<a href="${b.url}" target="_blank" rel="noopener">${b.seller}</a>` : ''}${b.native ? ` · ${b.native}` : ''}
+      <span class="bl-note">án sendingar og VSK</span>
+    </div></div>`;
+}
+
 function priceBlockHTML(s){
   const p = PRICES[s.n];
   if (p && p.cheapest!=null){
@@ -1098,7 +1127,9 @@ if (syncOn()){
     if (r.ok){
       const d = await r.json();
       PRICES = d.sets||{};
-      window.PRICES_META={updated:d.updated,fx:d.fx};
+      BRICKLINK = d.bricklink||{};
+      FX_USD = d.fx_usd||null;
+      window.PRICES_META={updated:d.updated,fx:d.fx,fx_usd:d.fx_usd};
       if (d.prod){ PROD_AUTO = d.prod; applyAutoProd(); }
       render(); renderTelemetry();
     }
