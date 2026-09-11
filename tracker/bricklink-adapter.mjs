@@ -24,9 +24,12 @@ const UA =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 ' +
   '(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
 
-const REQ_DELAY = 900;
-const REQ_JITTER = 400;
-const MAX_TRIES = 3;
+// BrickLink throttles GitHub Actions egress hard: a 900ms cadence with 3 tries
+// returned lots for only 19 of 124 sets, with failures spread evenly rather than
+// after a cutoff. Slower cadence and longer backoff give each set a better chance.
+const REQ_DELAY = 2200;
+const REQ_JITTER = 800;
+const MAX_TRIES = 4;
 
 // Geographic Europe, ISO-3166-alpha-2 as BrickLink reports them in
 // strSellerCountryCode. Includes GB and CH by choice.
@@ -65,7 +68,7 @@ async function getJson(url, referer) {
       return j;
     } catch (e) {
       last = e;
-      if (i < MAX_TRIES - 1) await sleep(1200 * 2 ** i + Math.random() * 400);
+      if (i < MAX_TRIES - 1) await sleep(2500 * 2 ** i + Math.random() * 800);
     }
   }
   throw last;

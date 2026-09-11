@@ -209,8 +209,13 @@ async function main() {
           Object.entries(prevBl).map(([k, v]) => [k, { ...v, stale: true }])
         );
       } else {
-        bricklink = { ...prevBl, ...bl };   // keep entries for sets not re-checked
-        for (const k of Object.keys(bl)) delete bricklink[k].stale;
+        // Coverage accumulates: entries this run couldn't fetch are kept from the
+        // previous run rather than dropped, but flagged stale so the panel can say
+        // when the price was actually seen.
+        bricklink = Object.fromEntries(
+          Object.entries(prevBl).map(([k, v]) => [k, { ...v, stale: true }])
+        );
+        for (const [k, v] of Object.entries(bl)) bricklink[k] = v;   // fresh wins, not stale
       }
     } catch (e) {
       console.error(`  BrickLink FAILED: ${e.message}`);
