@@ -196,7 +196,12 @@ async function main() {
   let bricklink = {}, fxUsd = null;
   if (!SKIP_BL) {
     try {
-      const bl = await scrapeBricklink(skus, { cachePath: BL_IDS_PATH });
+      const bl = await scrapeBricklink(skus, {
+        cachePath: BL_IDS_PATH,
+        prev: prevAll.bricklink || {},          // drives oldest-first ordering
+        maxPerRun: Number(process.env.PRICES_BL_PER_RUN || 45),
+        budgetMs: Number(process.env.PRICES_BL_BUDGET_MIN || 8) * 60 * 1000,
+      });
       fxUsd = bl.fx_usd ?? null;
       const prevBl = prevAll.bricklink || {};
       const freshCount = Object.keys(bl).length;

@@ -24,12 +24,16 @@ const UA =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 ' +
   '(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
 
-// BrickLink throttles GitHub Actions egress hard: a 900ms cadence with 3 tries
-// returned lots for only 19 of 124 sets, with failures spread evenly rather than
-// after a cutoff. Slower cadence and longer backoff give each set a better chance.
-const REQ_DELAY = 2200;
-const REQ_JITTER = 800;
-const MAX_TRIES = 4;
+// BrickLink throttles GitHub Actions egress hard: roughly 85% of lot fetches fail
+// from a runner while succeeding reliably elsewhere. Long retry chains are therefore
+// a trap — they multiply the cost of the common case (failure) and blew the job's
+// 30-minute budget. Instead: short retries, a per-run set budget, a wall-clock
+// deadline, and a circuit breaker that abandons the pass when it's clearly blocked.
+// Coverage accumulates across runs, so a partial pass every day still converges.
+const REQ_DELAY = 1500;
+const REQ_JITTER = 500;
+const MAX_TRIES = 2;
+const CONSECUTIVE_FAIL_LIMIT = 12;   // give up on the run after this many in a row
 
 // Geographic Europe, ISO-3166-alpha-2 as BrickLink reports them in
 // strSellerCountryCode. Includes GB and CH by choice.
@@ -68,7 +72,7 @@ async function getJson(url, referer) {
       return j;
     } catch (e) {
       last = e;
-      if (i < MAX_TRIES - 1) await sleep(2500 * 2 ** i + Math.random() * 800);
+      if (i < MAX_TRIES - 1) await sleep(1500 + Math.random() * 500);
     }
   }
   throw last;
@@ -96,7 +100,7 @@ async function usdToIsk() {
  * Resolve set numbers to BrickLink idItem values, using a committed cache.
  * itemids never change, so each set costs one request exactly once.
  */
-async function resolveItemIds(skus, cachePath) {
+async function resolveItemIds(skus, cachePath, deadline = Infinity) {
   let cache = {};
   try { cache = JSON.parse(await readFile(cachePath, 'utf8')); } catch { /* first run */ }
 
@@ -104,6 +108,7 @@ async function resolveItemIds(skus, cachePath) {
   let resolved = 0, notFound = 0;
 
   for (const sku of missing) {
+    if (Date.now() > deadline) { console.error('[bricklink] id resolution hit the time budget'); break; }
     const setno = `${sku}-1`;
     try {
       const j = await getJson(SEARCH_URL(setno), 'https://www.bricklink.com/v2/search.page');
@@ -133,17 +138,40 @@ async function resolveItemIds(skus, cachePath) {
  * @returns {Promise<object>} { sku: { min_isk, lots, ... } } with a .stats property
  */
 export async function scrapeBricklink(skus = [], opts = {}) {
-  const wanted = [...new Set(skus.map(String).filter(Boolean))];
+  const all = [...new Set(skus.map(String).filter(Boolean))];
   const cachePath = opts.cachePath || new URL('../bricklink-ids.json', import.meta.url);
+  const maxPerRun = opts.maxPerRun ?? 45;
+  const deadline = Date.now() + (opts.budgetMs ?? 8 * 60 * 1000);
+  const prev = opts.prev || {};
 
-  const ids = await resolveItemIds(wanted, cachePath);
+  // Prioritise sets we have nothing for, then the ones fetched longest ago, so
+  // repeated partial runs converge on full coverage instead of re-checking the
+  // same head of the list every day.
+  const wanted = [...all].sort((a, b) => {
+    const ta = prev[a]?.scraped_at ? Date.parse(prev[a].scraped_at) : 0;
+    const tb = prev[b]?.scraped_at ? Date.parse(prev[b].scraped_at) : 0;
+    return ta - tb;
+  }).slice(0, maxPerRun);
+
+  const ids = await resolveItemIds(wanted, cachePath, deadline);
   const fx = await usdToIsk();
   if (!fx) console.warn('[bricklink] no USD->ISK rate; prices will be USD only');
 
   const out = {};
-  const stats = { requested: wanted.length, hit: 0, noLots: 0, noId: 0, error: 0 };
+  const stats = { requested: wanted.length, ofTotal: all.length, hit: 0, noLots: 0, noId: 0, error: 0, aborted: false };
+  let consecutiveFails = 0;
 
   for (const sku of wanted) {
+    if (Date.now() > deadline) {
+      stats.aborted = 'deadline';
+      console.error('[bricklink] time budget reached — stopping this run');
+      break;
+    }
+    if (consecutiveFails >= CONSECUTIVE_FAIL_LIMIT) {
+      stats.aborted = 'blocked';
+      console.error(`[bricklink] ${consecutiveFails} failures in a row — abandoning this run`);
+      break;
+    }
     const itemid = ids[sku];
     if (!itemid) { stats.noId++; continue; }
 
@@ -158,7 +186,7 @@ export async function scrapeBricklink(skus = [], opts = {}) {
           EUROPE.has(String(x.strSellerCountryCode || '').toUpperCase())
       );
 
-      if (!lots.length) { stats.noLots++; continue; }
+      if (!lots.length) { stats.noLots++; consecutiveFails = 0; continue; }
 
       lots.sort((a, b) => (usd(a.mDisplaySalePrice) ?? 1e9) - (usd(b.mDisplaySalePrice) ?? 1e9));
       const best = lots[0];
@@ -181,8 +209,10 @@ export async function scrapeBricklink(skus = [], opts = {}) {
         scraped_at: new Date().toISOString(),
       };
       stats.hit++;
+      consecutiveFails = 0;
     } catch (e) {
       stats.error++;
+      consecutiveFails++;
       console.warn(`[bricklink] lots failed for ${sku}: ${e.message}`);
     }
     await sleep(REQ_DELAY + Math.random() * REQ_JITTER);
@@ -190,7 +220,8 @@ export async function scrapeBricklink(skus = [], opts = {}) {
 
   console.error(
     `[bricklink] ${stats.hit} with lots / ${stats.noLots} none in EU+ships-IS / ` +
-      `${stats.noId} not in catalog / ${stats.error} error of ${stats.requested}` +
+      `${stats.noId} not in catalog / ${stats.error} error of ${stats.requested} ` +
+      `(${stats.ofTotal} tracked)` + (stats.aborted ? ` [ABORTED: ${stats.aborted}]` : '') +
       (fx ? ` (USD ${fx.toFixed(2)} kr)` : '')
   );
 
