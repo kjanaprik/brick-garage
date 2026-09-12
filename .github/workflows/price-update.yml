@@ -21,10 +21,11 @@ concurrency:
 jobs:
   prices:
     runs-on: ubuntu-latest
-    # Raised from 20: BrickLink adds an itemid lookup per new set plus a lot fetch per
-    # set, and Boozt now makes a second (name-based) request on every miss. The itemid
-    # cache removes most of the BrickLink cost from the second run onwards.
-    timeout-minutes: 30
+    # Raised from 20: BrickLink adds a lot fetch per set and Boozt now makes a second
+    # (name-based) request on every miss. Run #51 hit the old 30-minute ceiling, so
+    # this leaves headroom. BrickLink self-limits via PRICES_BL_BUDGET_MIN below, so
+    # it can no longer be the thing that overruns.
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
 
@@ -38,6 +39,13 @@ jobs:
           BG_SYNC_URL: ${{ secrets.BG_SYNC_URL }}         # Worker GET endpoint (returns synced blob; also supplies Owned status)
           BG_SYNC_KEY: ${{ secrets.BG_SYNC_KEY }}         # only if that route needs auth; leave unset otherwise
           BRICKSET_API_KEY: ${{ secrets.BRICKSET_API_KEY }} # production status (available/retired); unset = keep page seed
+          # BrickLink 403s GitHub's egress but answers Cloudflare's, so BrickLink
+          # requests are routed through the brick-garage-bl Worker. Unset these two
+          # and the adapter goes back to calling BrickLink directly.
+          BL_PROXY_URL: ${{ secrets.BL_PROXY_URL }}
+          BL_PROXY_KEY: ${{ secrets.BL_PROXY_KEY }}
+          PRICES_BL_PER_RUN: '150'                        # proxy works, so attempt all sets
+          PRICES_BL_BUDGET_MIN: '12'
           # PRICES_SKIP_BRICKLINK: '1'                    # uncomment to skip the marketplace pass
         run: node tracker/update-prices.mjs
 
@@ -48,7 +56,10 @@ jobs:
           # bricklink-ids.json is the set-number -> BrickLink itemid cache. itemids are
           # permanent, so committing it means each set is resolved once ever instead of
           # on every run (~145 avoidable requests a day).
-          FILES="prices.json bricklink-ids.json"
+          # boozt-misses.json holds the consecutive-miss counters that suppress the
+          # Boozt name fallback for sets it doesn't stock. It must persist between runs
+          # or the suppression resets every day and the 429s come back.
+          FILES="prices.json bricklink-ids.json boozt-misses.json"
           if git diff --quiet -- $FILES; then
             echo "No price changes."
           else
