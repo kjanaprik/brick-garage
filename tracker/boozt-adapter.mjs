@@ -19,9 +19,22 @@ const REQ_DELAY = 1200;  // ms between SKUs (+ up to 600ms jitter)
 const REQ_JITTER = 600;
 const MAX_TRIES = 3;
 
+// A 429 is a rate limit, not a blip: back off far harder than for a network error,
+// and don't burn the remaining tries in quick succession.
+const RATE_LIMIT_BACKOFF = 9000;
+
+// The name fallback exists for sets Boozt lists without their set number (42236).
+// But it fires on every miss, and most misses are sets Boozt simply doesn't stock —
+// vintage Technic, mostly. Those searches cost a request each, return nothing, and
+// were generating enough traffic to trigger HTTP 429s that cost us sets which would
+// otherwise have resolved. After this many consecutive total misses, stop paying for
+// the second search; a later stage-1 hit resets the counter.
+const FALLBACK_GIVE_UP_AFTER = 2;
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 class FetchFailure extends Error {}
+class RateLimited extends FetchFailure {}
 
 async function getProducts(url) {
   let last;
@@ -34,6 +47,7 @@ async function getProducts(url) {
           'Accept-Language': 'is-IS,is;q=0.9,en;q=0.8',
         },
       });
+      if (res.status === 429) throw new RateLimited('HTTP 429');
       if (!res.ok) throw new FetchFailure(`HTTP ${res.status}`);
       const html = await res.text();
       const products = extractProducts(html);
@@ -46,7 +60,8 @@ async function getProducts(url) {
     } catch (e) {
       last = e;
       if (i < MAX_TRIES - 1) {
-        await sleep(1500 * 2 ** i + Math.random() * 500);
+        const base = e instanceof RateLimited ? RATE_LIMIT_BACKOFF : 1500;
+        await sleep(base * 2 ** i + Math.random() * 500);
       }
     }
   }
@@ -150,10 +165,14 @@ function normalise(retailer, o, sku) {
 }
 
 function makeScraper(retailer, host) {
-  return async function scrape(skus = [], names = null) {
+  return async function scrape(skus = [], names = null, opts = {}) {
+    // Both hosts share a backend; staggering the second one stops them marching
+    // in lockstep through the same rate limiter.
+    if (opts.startDelayMs) await sleep(opts.startDelayMs);
+    const misses = opts.misses || {};   // { sku: consecutive total misses }, mutated in place
     const wanted = [...new Set((skus || []).map((s) => String(s).trim()).filter(Boolean))];
     const out = [];
-    const stats = { requested: wanted.length, hit: 0, byName: 0, miss: 0, error: 0, errorSkus: [] };
+    const stats = { requested: wanted.length, hit: 0, byName: 0, miss: 0, error: 0, skipped: 0, errorSkus: [] };
 
     for (const sku of wanted) {
       try {
@@ -166,7 +185,9 @@ function makeScraper(retailer, host) {
         // a set named without its number ("Custom Garage Ford Mustang GT Car") is
         // unreachable by number and only findable this way. The URL-slug check in
         // isMatch is what confirms identity, since the name carries no number.
-        if (!hit && names && names[sku]) {
+        const giveUp = (misses[sku] || 0) >= FALLBACK_GIVE_UP_AFTER;
+        if (!hit && giveUp) stats.skipped++;
+        if (!hit && !giveUp && names && names[sku]) {
           await sleep(REQ_DELAY + Math.random() * REQ_JITTER);
           products = await getProducts(searchUrl(host, names[sku]));
           hit = products.find((o) => isMatch(o, sku));
@@ -176,9 +197,11 @@ function makeScraper(retailer, host) {
         if (hit) {
           out.push(normalise(retailer, hit, sku));
           stats.hit++;
+          delete misses[sku];               // it's stocked after all — re-enable fallback
         } else {
           // Real negative: pages loaded, no LEGO product matching this set.
           stats.miss++;
+          misses[sku] = (misses[sku] || 0) + 1;
         }
       } catch (e) {
         // Could not read the page after retries — NOT the same as "not stocked".
@@ -192,6 +215,7 @@ function makeScraper(retailer, host) {
     console.log(
       `[${retailer}] ${stats.hit} hit (${stats.byName} via name) / ${stats.miss} miss / ` +
         `${stats.error} error of ${stats.requested}` +
+        (stats.skipped ? `, ${stats.skipped} fallback skipped` : '') +
         (stats.error ? ` — failed: ${stats.errorSkus.join(',')}` : '')
     );
 

@@ -30,8 +30,10 @@ const UA =
 // 30-minute budget. Instead: short retries, a per-run set budget, a wall-clock
 // deadline, and a circuit breaker that abandons the pass when it's clearly blocked.
 // Coverage accumulates across runs, so a partial pass every day still converges.
-const REQ_DELAY = 1500;
-const REQ_JITTER = 500;
+// Through the Worker, BrickLink allowed ~21 sets before refusing in a burst, so
+// pace it rather than sprinting. The Worker also retries once on 429 internally.
+const REQ_DELAY = 2500;
+const REQ_JITTER = 1000;
 const MAX_TRIES = 2;
 const CONSECUTIVE_FAIL_LIMIT = 12;   // give up on the run after this many in a row
 
@@ -103,12 +105,20 @@ function usd(s) {
   return Number.isFinite(n) ? n : null;
 }
 
+// open.er-api publishes the mid-market rate, but nothing is ever bought at mid.
+// Paying a European seller by card settles at the card scheme's sell rate plus the
+// issuer's FX fee — on 12.09.2026 Visa's EUR sölugengi was 143.1939 against a
+// mid of 140.42, a spread of 1.97%. That spread is contractual and stable even as
+// the underlying rate moves daily, so applying it as a multiplier tracks the real
+// cost far better than mid does. Override with PRICES_FX_SPREAD (e.g. '0' for mid).
+const FX_SPREAD = Number(process.env.PRICES_FX_SPREAD ?? 0.02);
+
 async function usdToIsk() {
   try {
     const r = await fetch('https://open.er-api.com/v6/latest/USD');
     const j = await r.json();
-    const rate = j?.rates?.ISK;
-    if (rate) return rate;
+    const mid = j?.rates?.ISK;
+    if (mid) return mid * (1 + FX_SPREAD);
   } catch { /* fall through */ }
   return null;
 }
