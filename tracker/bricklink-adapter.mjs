@@ -48,27 +48,44 @@ const KEEP_COMPLETE = new Set(['S', 'C']);   // sealed, complete. 'B' = incomple
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// BrickLink 403s GitHub Actions' egress but answers Cloudflare's. When BL_PROXY_URL
+// is set, requests go through the brick-garage-bl Worker instead of direct. Unset,
+// the adapter behaves exactly as before, so this is safe to deploy ahead of the
+// Worker and to fall back to if the Worker is ever down.
+const PROXY = (process.env.BL_PROXY_URL || '').replace(/\/$/, '');
+const PROXY_KEY = process.env.BL_PROXY_KEY || '';
+const viaProxy = () => !!PROXY;
+
 const SEARCH_URL = (setno) =>
-  'https://www.bricklink.com/ajax/clone/search/searchproduct.ajax?' +
+  viaProxy()
+    ? `${PROXY}/resolve?setno=${encodeURIComponent(setno)}`
+    : 'https://www.bricklink.com/ajax/clone/search/searchproduct.ajax?' +
   `q=${encodeURIComponent(setno)}&st=0&cond=&type=S&cat=&yf=0&yt=0&loc=&reg=0` +
   '&ca=0&ss=&pmt=&nmp=0&color=-1&min=0&max=0&minqty=0&nosuperlot=1' +
-  '&incomplete=0&showempty=1&rpp=5&pi=1&ci=0';
+      '&incomplete=0&showempty=1&rpp=5&pi=1&ci=0';
 
-const LOTS_URL = (itemid) =>
-  `https://www.bricklink.com/ajax/clone/catalogifs.ajax?itemid=${itemid}` +
-  '&rpp=500&cond=N&ss=IS';
+const LOTS_URL = (itemid, sku) =>
+  viaProxy()
+    ? `${PROXY}/lots?sku=${encodeURIComponent(sku)}&itemid=${itemid}`
+    : `https://www.bricklink.com/ajax/clone/catalogifs.ajax?itemid=${itemid}` +
+      '&rpp=500&cond=N&ss=IS';
 
 async function getJson(url, referer) {
   let last;
   for (let i = 0; i < MAX_TRIES; i++) {
     try {
-      const res = await fetch(url, {
-        headers: { 'User-Agent': UA, Accept: 'application/json', Referer: referer },
-      });
+      const headers = PROXY_KEY && viaProxy()
+        ? { 'X-BG-Key': PROXY_KEY }
+        : { 'User-Agent': UA, Accept: 'application/json', Referer: referer };
+      const res = await fetch(url, { headers });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const j = await res.json();
+      if (j.error) throw new Error(j.error);
       // returnCode 0 = OK. Anything else (e.g. -1 "Invalid request!") is a failure.
-      if (j.returnCode !== 0) throw new Error(j.returnMessage || `returnCode ${j.returnCode}`);
+      // The proxy strips returnCode, so only check it on direct responses.
+      if (!viaProxy() && j.returnCode !== 0) {
+        throw new Error(j.returnMessage || `returnCode ${j.returnCode}`);
+      }
       return j;
     } catch (e) {
       last = e;
@@ -112,9 +129,14 @@ async function resolveItemIds(skus, cachePath, deadline = Infinity) {
     const setno = `${sku}-1`;
     try {
       const j = await getJson(SEARCH_URL(setno), 'https://www.bricklink.com/v2/search.page');
-      const items = (j.result?.typeList || []).flatMap((t) => t.items || []);
-      const hit = items.find((it) => it.strItemNo === setno) || items[0];
-      if (hit?.idItem) { cache[sku] = hit.idItem; resolved++; }
+      let idItem = null;
+      if (viaProxy()) {
+        idItem = j.idItem ?? null;
+      } else {
+        const items = (j.result?.typeList || []).flatMap((t) => t.items || []);
+        idItem = (items.find((it) => it.strItemNo === setno) || items[0])?.idItem ?? null;
+      }
+      if (idItem) { cache[sku] = idItem; resolved++; }
       else { cache[sku] = null; notFound++; }   // cache the negative too
     } catch (e) {
       console.warn(`[bricklink] itemid lookup failed for ${setno}: ${e.message}`);
@@ -177,14 +199,18 @@ export async function scrapeBricklink(skus = [], opts = {}) {
 
     try {
       const j = await getJson(
-        LOTS_URL(itemid),
+        LOTS_URL(itemid, sku),
         `https://www.bricklink.com/v2/catalog/catalogitem.page?S=${sku}-1`
       );
-      const lots = (j.list || []).filter(
-        (x) =>
-          KEEP_COMPLETE.has(x.codeComplete) &&
-          EUROPE.has(String(x.strSellerCountryCode || '').toUpperCase())
-      );
+      // The Worker applies the same completeness/Europe filter before responding,
+      // so proxied results arrive ready to use.
+      const lots = viaProxy()
+        ? (j.lots || [])
+        : (j.list || []).filter(
+            (x) =>
+              KEEP_COMPLETE.has(x.codeComplete) &&
+              EUROPE.has(String(x.strSellerCountryCode || '').toUpperCase())
+          );
 
       if (!lots.length) { stats.noLots++; consecutiveFails = 0; continue; }
 
@@ -222,7 +248,7 @@ export async function scrapeBricklink(skus = [], opts = {}) {
     `[bricklink] ${stats.hit} with lots / ${stats.noLots} none in EU+ships-IS / ` +
       `${stats.noId} not in catalog / ${stats.error} error of ${stats.requested} ` +
       `(${stats.ofTotal} tracked)` + (stats.aborted ? ` [ABORTED: ${stats.aborted}]` : '') +
-      (fx ? ` (USD ${fx.toFixed(2)} kr)` : '')
+      (fx ? ` (USD ${fx.toFixed(2)} kr)` : '') + (viaProxy() ? ' [via worker]' : '')
   );
 
   Object.defineProperty(out, 'stats', { value: stats, enumerable: false });
