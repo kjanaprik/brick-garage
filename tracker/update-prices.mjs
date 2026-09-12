@@ -36,6 +36,9 @@ const IGNORE_PATH  = rel(process.env.PRICES_IGNORE || '../ignore-skus.json');
 const WATCH_PATH   = rel(process.env.PRICES_WATCH || '../watch-skus.json');
 const ALERTS_PATH  = rel(process.env.PRICES_ALERTS || '../price-alerts.md');
 const BL_IDS_PATH  = rel(process.env.PRICES_BL_IDS || '../bricklink-ids.json');
+// Consecutive-miss counters for the Boozt/Booztlet name fallback. Committed so the
+// suppression survives between runs — that's the whole point of it.
+const MISS_PATH    = rel(process.env.PRICES_MISSES || '../boozt-misses.json');
 // Set PRICES_SKIP_BRICKLINK=1 to skip the marketplace pass entirely.
 const SKIP_BL = process.env.PRICES_SKIP_BRICKLINK === '1';
 
@@ -149,6 +152,7 @@ async function main() {
 
   // Previous run: read once and reuse for history, production status and FX fallback.
   const prevAll = await readJson(OUT_PATH, {});
+  const missCounts = await readJson(MISS_PATH, {});
   const prev = prevAll.sets || {};
   const prevUpdated = prevAll.updated || null;
 
@@ -177,8 +181,12 @@ async function main() {
     let rows = [], failed = false;
     try {
       // nameOf is passed as a second arg for adapters that can fall back to a
-      // name search (Boozt/Booztlet). Others ignore it.
-      rows = await fn(skus, nameOf);
+      // name search (Boozt/Booztlet). Others ignore both extra args.
+      rows = await fn(skus, nameOf, {
+        misses: (missCounts[label] ??= {}),
+        // Booztlet shares Boozt's backend — start it late so they don't collide.
+        startDelayMs: label === 'Booztlet' ? 45000 : 0,
+      });
       console.error(`  ${label}: ${rows.length}`);
     } catch (e) {
       console.error(`  ${label} FAILED: ${e.message}`);
@@ -300,6 +308,13 @@ async function main() {
     bricklink,
   };
   await writeFile(OUT_PATH, JSON.stringify(out));
+  // Drop counters for sets we no longer track, so the file can't grow forever.
+  for (const label of Object.keys(missCounts)) {
+    for (const sku of Object.keys(missCounts[label])) {
+      if (!skus.includes(sku)) delete missCounts[label][sku];
+    }
+  }
+  await writeFile(MISS_PATH, JSON.stringify(missCounts, null, 1));
 
   // ---- alert report ----
   const ICON = { lowest: '⭐ lowest ever', drop: '▼ price drop', sale: '🏷️ new sale', restock: '🔄 back in stock' };
