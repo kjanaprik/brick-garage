@@ -188,12 +188,14 @@
   a.bl-box:hover { border-color: var(--accent); background: rgba(255,255,255,.05); }
   a.bl-box:hover .bl-go { opacity: 1; transform: translateX(1px); }
   a.bl-box:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-  .bl-head { display: flex; align-items: baseline; gap: 7px; padding: 8px 11px; font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--text-faint); }
+  .bl-head { display: flex; align-items: baseline; gap: 7px; padding: 8px 11px; font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; color: var(--text-dim); }
   .bl-head .bl-price { font-size: 13px; letter-spacing: 0; text-transform: none; font-weight: 600; color: var(--accent); margin-left: auto; }
-  .bl-go { font-size: 11px; color: var(--accent); opacity: .55; transition: opacity .12s, transform .12s; }
-  .bl-meta { padding: 0 11px 9px; font-size: 10.5px; color: var(--text-faint); line-height: 1.5; }
-  .bl-seller { color: var(--text-dim); }
-  .bl-meta .bl-note { display: block; margin-top: 4px; font-style: italic; opacity: .8; }
+  .bl-go { font-size: 12px; color: var(--accent); opacity: .8; transition: opacity .12s, transform .12s; }
+  /* Was --text-faint at 10.5px: 3.08:1 against the card, under the 4.5:1 minimum
+     for text this size. --text-dim measures 5.69:1. */
+  .bl-meta { padding: 0 11px 9px; font-size: 11px; color: var(--text-dim); line-height: 1.55; }
+  .bl-seller { color: var(--text); font-weight: 500; }   /* the seller is the thing you act on */
+  .bl-meta .bl-note { display: block; margin-top: 4px; font-style: italic; color: var(--text-faint); }
   .bl-stale { font-style: italic; opacity: .7; }
   /* What the panel is actually for: how much cheaper than any tracked retailer. */
   .bl-save { display: inline-block; margin-top: 5px; padding: 1.5px 6px; border-radius: 4px;
@@ -388,10 +390,10 @@
   .pr-bundled { font-size: 9.5px; color: var(--text-faint); }
   .pr-go { color: var(--text-faint); font-size: 10px; flex-shrink: 0; }
   .pr-row.oos { opacity: .45; }
-  .pr-row.oos .pr-val::after { content: ' · OOS'; font-size: 9.5px; color: var(--text-faint); }
+  .pr-row.oos .pr-val::after { content: ' · OOS'; font-size: 10px; color: var(--text-dim); }
   .pr-row.stale { opacity: .55; }
-  .pr-stale { font-size: 9.5px; color: var(--text-faint); font-style: italic; }
-  .pb-stale { font-size: 9.5px; color: var(--text-faint); font-style: italic; }
+  .pr-stale { font-size: 10px; color: var(--text-dim); font-style: italic; }
+  .pb-stale { font-size: 10px; color: var(--text-dim); font-style: italic; }
 </style>
 
 <div class="wrap">
