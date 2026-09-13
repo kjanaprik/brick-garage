@@ -19,9 +19,13 @@ const REQ_DELAY = 1200;  // ms between SKUs (+ up to 600ms jitter)
 const REQ_JITTER = 600;
 const MAX_TRIES = 3;
 
-// A 429 is a rate limit, not a blip: back off far harder than for a network error,
-// and don't burn the remaining tries in quick succession.
-const RATE_LIMIT_BACKOFF = 9000;
+// A 429 means the backend is refusing us. Retrying it is close to pointless — and
+// when the limit is sustained rather than occasional, long backoffs are actively
+// harmful: at 9s + 18s per set across 124 sets the job overran its 40-minute budget
+// without collecting anything. So: fail a rate-limited request immediately, and if
+// they keep coming, abandon the retailer for this run and let carry-forward hold the
+// previous values. Runtime stays bounded no matter how hard we're being throttled.
+const RATE_LIMIT_ABORT_AFTER = 10;   // consecutive 429s before giving up on the run
 
 // The name fallback exists for sets Boozt lists without their set number (42236).
 // But it fires on every miss, and most misses are sets Boozt simply doesn't stock —
@@ -59,10 +63,8 @@ async function getProducts(url) {
       return products;
     } catch (e) {
       last = e;
-      if (i < MAX_TRIES - 1) {
-        const base = e instanceof RateLimited ? RATE_LIMIT_BACKOFF : 1500;
-        await sleep(base * 2 ** i + Math.random() * 500);
-      }
+      if (e instanceof RateLimited) throw e;   // no retry: the answer won't change
+      if (i < MAX_TRIES - 1) await sleep(1500 * 2 ** i + Math.random() * 500);
     }
   }
   throw new FetchFailure(last?.message || 'fetch failed');
@@ -172,9 +174,15 @@ function makeScraper(retailer, host) {
     const misses = opts.misses || {};   // { sku: consecutive total misses }, mutated in place
     const wanted = [...new Set((skus || []).map((s) => String(s).trim()).filter(Boolean))];
     const out = [];
-    const stats = { requested: wanted.length, hit: 0, byName: 0, miss: 0, error: 0, skipped: 0, errorSkus: [] };
+    const stats = { requested: wanted.length, hit: 0, byName: 0, miss: 0, error: 0, skipped: 0, aborted: false, errorSkus: [] };
+    let consecutive429 = 0;
 
     for (const sku of wanted) {
+      if (consecutive429 >= RATE_LIMIT_ABORT_AFTER) {
+        stats.aborted = 'rate-limited';
+        console.warn(`[${retailer}] ${consecutive429} rate limits in a row — abandoning this run`);
+        break;
+      }
       try {
         // Stage 1 — search by set number. Works whenever Boozt put the number in
         // the product name, which is most but not all of the catalogue.
@@ -197,17 +205,24 @@ function makeScraper(retailer, host) {
         if (hit) {
           out.push(normalise(retailer, hit, sku));
           stats.hit++;
+          consecutive429 = 0;
           delete misses[sku];               // it's stocked after all — re-enable fallback
         } else {
           // Real negative: pages loaded, no LEGO product matching this set.
           stats.miss++;
+          consecutive429 = 0;
           misses[sku] = (misses[sku] || 0) + 1;
         }
       } catch (e) {
-        // Could not read the page after retries — NOT the same as "not stocked".
+        // Could not read the page — NOT the same as "not stocked".
         stats.error++;
         stats.errorSkus.push(sku);
-        console.warn(`[${retailer}] request failed for ${sku}: ${e.message}`);
+        if (e instanceof RateLimited) consecutive429++;
+        else consecutive429 = 0;
+        // One line per failure is noise when we're being blocked wholesale.
+        if (stats.error <= 5 || !(e instanceof RateLimited)) {
+          console.warn(`[${retailer}] request failed for ${sku}: ${e.message}`);
+        }
       }
       await sleep(REQ_DELAY + Math.random() * REQ_JITTER);
     }
@@ -216,6 +231,7 @@ function makeScraper(retailer, host) {
       `[${retailer}] ${stats.hit} hit (${stats.byName} via name) / ${stats.miss} miss / ` +
         `${stats.error} error of ${stats.requested}` +
         (stats.skipped ? `, ${stats.skipped} fallback skipped` : '') +
+        (stats.aborted ? ` [ABORTED: ${stats.aborted}]` : '') +
         (stats.error ? ` — failed: ${stats.errorSkus.join(',')}` : '')
     );
 
