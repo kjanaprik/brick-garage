@@ -22,7 +22,9 @@
 // Icelandic import VAT apply:
 //     ex_eu_vat  = eur / EU_VAT                          (EU_VAT = 1.21, Dutch VAT)
 //     ship_eur   = max(28.05, 18.79 + 4.88 * weight_kg)  (fitted to real IS checkout)
-//     landed_isk = round( (ex_eu_vat + ship_eur) * VAT * EUR_ISK )   (VAT = 1.24 IS)
+//     goods      = ex_eu_vat + ship_eur
+//     landed_isk = round( goods * EUR_ISK_CARD  +  goods * (VAT-1) * EUR_ISK )
+//                  (card rate on what you pay; official rate on the 24% import VAT)
 // weight_kg is scraped from the product page ("Weight … g"); falls back to 1.5 kg.
 // This is "buy-alone" shipping (one set ~= the €28 minimum); bundling lowers per-set.
 // Sale detection is intentionally NOT attempted from the page (no reliable
@@ -30,8 +32,16 @@
 
 const BASE       = (process.env.BRICKSHOP_BASE || 'https://www.brickshop.eu').replace(/\/+$/, '');
 // EUR->ISK: pin with BRICKSHOP_EUR_ISK, else fetched live at scrape() start (fallback 145).
+// This is the MID-MARKET rate. Nothing is ever bought at mid: the euros charged by
+// Brickshop settle on a card at the scheme's sell rate plus the issuer's FX fee — on
+// 12.09.2026 Visa's EUR sölugengi was 143.1939 against a mid of 140.42, a spread of
+// 1.97%. The spread is contractual and stable while the underlying rate moves daily,
+// so a multiplier tracks the real cost well. Set PRICES_FX_SPREAD=0 for mid.
 const EUR_ISK_ENV = process.env.BRICKSHOP_EUR_ISK ? Number(process.env.BRICKSHOP_EUR_ISK) : null;
 let EUR_ISK       = EUR_ISK_ENV ?? 145;
+const FX_SPREAD   = Number(process.env.PRICES_FX_SPREAD ?? 0.02);
+// Rate applied to the part actually paid by card (goods + shipping).
+const cardRate = () => EUR_ISK * (1 + FX_SPREAD);
 const VAT        = Number(process.env.BRICKSHOP_VAT || 1.24);      // Icelandic import VAT
 const EU_VAT     = Number(process.env.BRICKSHOP_EU_VAT || 1.21);   // Dutch VAT baked into the listed price
 // Weight-based shipping to Iceland (buy-alone), fitted to real checkout data:
@@ -128,12 +138,21 @@ function shippingEur(kg) {
   return Math.max(SHIP_FLOOR, SHIP_BASE + SHIP_PER_KG * w);
 }
 
+// The two halves of a landed price convert at DIFFERENT rates, so they're computed
+// separately: goods + shipping are charged to the card and settle at the card rate,
+// while Icelandic import VAT is assessed by customs on the declared value using the
+// official published rate, not your card's. Multiplying the whole figure by the card
+// rate would overstate the VAT portion by roughly 0.4% of the total.
+function convertLanded(goodsEur) {
+  return Math.round(goodsEur * cardRate() + goodsEur * (VAT - 1) * EUR_ISK);
+}
+
 function landedIsk(eur, kg) {
   if (eur == null) return null;
   // Strip Dutch (EU) VAT (Iceland is outside the EU), add weight-based shipping,
   // then apply Icelandic import VAT and convert to ISK.
   const exEuVat = eur / EU_VAT;
-  return Math.round((exEuVat + shippingEur(kg)) * VAT * EUR_ISK);
+  return convertLanded(exEuVat + shippingEur(kg));
 }
 
 /**
@@ -205,7 +224,7 @@ function parseProduct(html, sku, path) {
   // Bundled landed price: marginal shipping only (per-kg, shared floor/base dropped),
   // i.e. the cost when this set rides along in a larger order.
   const bundled_isk = price_eur == null ? null
-    : Math.round((price_eur / EU_VAT + SHIP_PER_KG * (weight_kg ?? SHIP_FALLBACK_KG)) * VAT * EUR_ISK);
+    : convertLanded(price_eur / EU_VAT + SHIP_PER_KG * (weight_kg ?? SHIP_FALLBACK_KG));
 
   return {
     retailer: RETAILER,
@@ -221,7 +240,8 @@ function parseProduct(html, sku, path) {
     currency,
     weight_kg,                      // scraped shipping weight
     shipping_eur: Math.round(shippingEur(weight_kg) * 100) / 100,
-    fx_rate: EUR_ISK,               // EUR->ISK used for this landed price
+    fx_rate: EUR_ISK,               // mid-market EUR->ISK this landed price was built from
+    fx_card: Math.round(cardRate() * 10000) / 10000,   // card rate applied to goods+shipping
     base_eur,                       // pre-discount EUR (incl. NL VAT), null if not on sale
     discount_pct,                   // % off vs base, 0 if not on sale
     bundled_isk,                    // landed price when bundled in a larger order
@@ -280,7 +300,10 @@ export async function scrape(skus = []) {
   if (EUR_ISK_ENV == null) {
     const live = await fetchEurIsk();
     if (live) EUR_ISK = live;
-    console.error(`[${RETAILER}] EUR->ISK = ${EUR_ISK}${live ? ' (live)' : ' (fallback)'}`);
+    console.error(
+      `[${RETAILER}] EUR->ISK = ${EUR_ISK}${live ? ' (live)' : ' (fallback)'}` +
+        (FX_SPREAD ? `, card ${cardRate().toFixed(4)} (+${(FX_SPREAD * 100).toFixed(2)}%)` : '')
+    );
   }
 
   let map;
