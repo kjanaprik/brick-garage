@@ -180,13 +180,25 @@
   }
   button.action:hover { filter: brightness(1.08); }
   .chip.buy-toggle svg { width: 13px; height: 13px; margin-right: 5px; vertical-align: -2px; }
-  .bl-box { margin-top: 8px; border: 1px solid var(--line); border-radius: 8px; background: rgba(255,255,255,.02); overflow: hidden; }
+  /* The whole panel is the link — the seller name alone was too small a target
+     and gave no hint it was clickable. Mirrors how .pr-row rows behave. */
+  .bl-box { display: block; margin-top: 8px; border: 1px solid var(--line); border-radius: 8px;
+            background: rgba(255,255,255,.02); overflow: hidden; text-decoration: none;
+            transition: border-color .12s, background .12s; }
+  a.bl-box:hover { border-color: var(--accent); background: rgba(255,255,255,.05); }
+  a.bl-box:hover .bl-go { opacity: 1; transform: translateX(1px); }
+  a.bl-box:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
   .bl-head { display: flex; align-items: baseline; gap: 7px; padding: 8px 11px; font-size: 10px; letter-spacing: .08em; text-transform: uppercase; color: var(--text-faint); }
   .bl-head .bl-price { font-size: 13px; letter-spacing: 0; text-transform: none; font-weight: 600; color: var(--accent); margin-left: auto; }
+  .bl-go { font-size: 11px; color: var(--accent); opacity: .55; transition: opacity .12s, transform .12s; }
   .bl-meta { padding: 0 11px 9px; font-size: 10.5px; color: var(--text-faint); line-height: 1.5; }
-  .bl-meta a { color: var(--text-dim); text-decoration: none; border-bottom: 1px dotted var(--line); }
+  .bl-seller { color: var(--text-dim); }
   .bl-meta .bl-note { display: block; margin-top: 4px; font-style: italic; opacity: .8; }
   .bl-stale { font-style: italic; opacity: .7; }
+  /* What the panel is actually for: how much cheaper than any tracked retailer. */
+  .bl-save { display: inline-block; margin-top: 5px; padding: 1.5px 6px; border-radius: 4px;
+             background: rgba(45,164,78,.14); color: var(--good, #3fb950);
+             font-size: 10px; font-weight: 600; letter-spacing: .01em; }
   button.ghost {
     background: transparent; border: 1px solid var(--border); color: var(--text-dim);
     font-family: 'Saira Condensed', sans-serif; text-transform: uppercase; letter-spacing: 0.6px;
@@ -755,6 +767,15 @@ function staleDate(since){
 // Marketplace panel, deliberately separate from the retailer rows: these are
 // per-lot prices from private sellers and EXCLUDE shipping, 24% VSK and customs
 // handling, so they must not be compared directly against a landed retail price.
+// Sellers quote in their own currency and BrickLink hands it back at whatever
+// precision it stores, e.g. "EUR 235.4959". Show money like money.
+function tidyNative(v){
+  const m = String(v || '').match(/^([A-Z]{3})\s*([\d.,]+)$/);
+  if (!m) return v || '';
+  const n = Number(m[2].replace(/,/g, ''));
+  return Number.isFinite(n) ? `${m[1]} ${n.toFixed(2)}` : v;
+}
+
 function bricklinkBlockHTML(s){
   const b = BRICKLINK[s.n];
   if (!b || b.min_isk == null) return '';
@@ -762,13 +783,27 @@ function bricklinkBlockHTML(s){
   const where = b.country_name || b.country || '';
   const stale = b.stale ? `<span class="bl-stale"> · ${staleDate(b.scraped_at) || 'ekki uppfært'}</span>` : '';
   const others = b.lots > 1 ? ` · ${b.lots} lots in Europe` : '';
-  return `<div class="bl-box">
-    <div class="bl-head">BrickLink${stale}<span class="bl-price">${fmt(b.min_isk)} kr</span></div>
+
+  // Only worth flagging when it actually beats every retailer we track.
+  const p = PRICES[s.n];
+  const retail = p && p.cheapest != null ? p.cheapest : null;
+  const diff = retail != null ? retail - b.min_isk : null;
+  const save = diff != null && diff > 0
+    ? `<span class="bl-save">${fmt(diff)} kr ódýrara en ${p.shop}</span>`
+    : '';
+
+  const seller = b.seller ? `<span class="bl-seller">${b.seller}</span>` : '';
+  const native = b.native ? ` · ${tidyNative(b.native)}` : '';
+  const inner = `<div class="bl-head">BrickLink${stale}<span class="bl-price">${fmt(b.min_isk)} kr</span><span class="bl-go">↗</span></div>
     <div class="bl-meta">
       ${cond}${where ? ' · ' + where : ''}${others}<br>
-      ${b.seller ? `<a href="${b.url}" target="_blank" rel="noopener">${b.seller}</a>` : ''}${b.native ? ` · ${b.native}` : ''}
+      ${seller}${native}
       <span class="bl-note">án sendingar og VSK</span>
-    </div></div>`;
+      ${save}
+    </div>`;
+  return b.url
+    ? `<a class="bl-box" href="${b.url}" target="_blank" rel="noopener" title="Skoða á BrickLink">${inner}</a>`
+    : `<div class="bl-box">${inner}</div>`;
 }
 
 function priceBlockHTML(s){
