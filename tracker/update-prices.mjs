@@ -212,24 +212,22 @@ async function main() {
       });
       fxUsd = bl.fx_usd ?? null;
       const prevBl = prevAll.bricklink || {};
-      const freshCount = Object.keys(bl).length;
-      const prevCount = Object.keys(prevBl).filter((k) => skus.includes(k)).length;
-      // Same reasoning as the shop guard: a degraded marketplace pass shouldn't
-      // erase what we knew. Marked stale so the panel can say so.
-      if (prevCount && freshCount < prevCount * CARRY_FLOOR) {
-        console.error(`  BrickLink: ${freshCount} vs ${prevCount} last run — carrying forward`);
-        bricklink = Object.fromEntries(
-          Object.entries(prevBl).map(([k, v]) => [k, { ...v, stale: true }])
-        );
-      } else {
-        // Coverage accumulates: entries this run couldn't fetch are kept from the
-        // previous run rather than dropped, but flagged stale so the panel can say
-        // when the price was actually seen.
-        bricklink = Object.fromEntries(
-          Object.entries(prevBl).map(([k, v]) => [k, { ...v, stale: true }])
-        );
-        for (const [k, v] of Object.entries(bl)) bricklink[k] = v;   // fresh wins, not stale
-      }
+      // NO volume floor here, unlike the retailer adapters. The BrickLink pass is
+      // deliberately partial — a per-run budget plus a circuit breaker mean it is
+      // SUPPOSED to return a fraction of the tracked sets each run, and oldest-first
+      // ordering makes coverage accumulate over successive runs. Treating a small
+      // result as a failed scrape (as the shop guard does) discarded good fresh rows
+      // and pinned coverage in place. A fetched lot is never worse than a stale one,
+      // so always merge fresh over previous.
+      bricklink = Object.fromEntries(
+        Object.entries(prevBl).map(([k, v]) => [k, { ...v, stale: true }])
+      );
+      for (const [k, v] of Object.entries(bl)) bricklink[k] = v;   // fresh wins, not stale
+      const gained = Object.keys(bl).filter((k) => !prevBl[k]).length;
+      console.error(
+        `  BrickLink: ${Object.keys(bl).length} fresh (+${gained} new), ` +
+          `${Object.keys(bricklink).length} of ${skus.length} covered`
+      );
     } catch (e) {
       console.error(`  BrickLink FAILED: ${e.message}`);
       bricklink = Object.fromEntries(
