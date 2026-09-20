@@ -59,7 +59,11 @@ jobs:
           # boozt-misses.json holds the consecutive-miss counters that suppress the
           # Boozt name fallback for sets it doesn't stock. It must persist between runs
           # or the suppression resets every day and the 429s come back.
-          FILES="prices.json bricklink-ids.json boozt-misses.json"
+          # bricklink-lots.json is the retained per-seller lot list that
+          # bricklink-sellers.mjs reads. A single run only covers part of the
+          # catalogue, so it has to persist and accumulate across runs or there is
+          # never enough overlap to find a seller holding several missing sets.
+          FILES="prices.json bricklink-ids.json boozt-misses.json bricklink-lots.json"
           if git diff --quiet -- $FILES; then
             echo "No price changes."
           else
