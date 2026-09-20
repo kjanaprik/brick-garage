@@ -36,6 +36,11 @@ const IGNORE_PATH  = rel(process.env.PRICES_IGNORE || '../ignore-skus.json');
 const WATCH_PATH   = rel(process.env.PRICES_WATCH || '../watch-skus.json');
 const ALERTS_PATH  = rel(process.env.PRICES_ALERTS || '../price-alerts.md');
 const BL_IDS_PATH  = rel(process.env.PRICES_BL_IDS || '../bricklink-ids.json');
+// Per-seller lot lists, retained so bricklink-sellers.mjs can find sellers holding
+// several missing sets. Costs no extra requests — catalogifs already returns every
+// lot and the adapter was discarding all but the cheapest. Merged, never replaced,
+// so a throttled run covering 12 sets doesn't wipe the other 130.
+const BL_LOTS_PATH = rel(process.env.PRICES_BL_LOTS || '../bricklink-lots.json');
 // Consecutive-miss counters for the Boozt/Booztlet name fallback. Committed so the
 // suppression survives between runs — that's the whole point of it.
 const MISS_PATH    = rel(process.env.PRICES_MISSES || '../boozt-misses.json');
@@ -206,6 +211,8 @@ async function main() {
     try {
       const bl = await scrapeBricklink(skus, {
         cachePath: BL_IDS_PATH,
+        lotsPath: BL_LOTS_PATH,
+        keepLots: Number(process.env.PRICES_BL_KEEP_LOTS || 40),
         prev: prevAll.bricklink || {},          // drives oldest-first ordering
         maxPerRun: Number(process.env.PRICES_BL_PER_RUN || 45),
         budgetMs: Number(process.env.PRICES_BL_BUDGET_MIN || 8) * 60 * 1000,
