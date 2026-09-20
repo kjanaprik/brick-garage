@@ -17,6 +17,19 @@
 // Prices are per-lot and EXCLUDE shipping, Icelandic VSK and customs handling.
 // They are written to a separate `bricklink` block in prices.json, never mixed
 // into `shops`, precisely because they aren't comparable to a landed retail price.
+//
+// LOT RETENTION (for bricklink-consolidate.mjs)
+// The cheapest lot answers "what does this set cost". It cannot answer "does one
+// seller have three of my missing sets", which is the question that actually saves
+// money, because every extra parcel from the EU costs shipping + VSK on shipping +
+// a flat customs handling fee. So the qualifying lots are also written, compacted,
+// to bricklink-lots.json when `lotsPath` is given. This costs zero extra requests —
+// catalogifs already returns up to rpp=500 lots per call and we were discarding them.
+//
+// Grouping key is `strSellerUsername`, NOT `strStorename`. Those two differ for the
+// large majority of lots (the account 'PandaRabbit' trades as 'The Rabbit Hole'),
+// and storename is a mutable display field. Username is the account handle and is
+// what store.bricklink.com/<username> resolves against.
 
 import { readFile, writeFile } from 'node:fs/promises';
 
@@ -97,9 +110,11 @@ async function getJson(url, referer) {
   throw last;
 }
 
-// "US $157.30" -> 157.30
+// "US $157.30" -> 157.30 ; "None" -> null
 function usd(s) {
-  const m = String(s || '').match(/([\d.,]+)\s*$/);
+  const str = String(s ?? '');
+  if (!str || str === 'None') return null;
+  const m = str.match(/([\d.,]+)\s*$/);
   if (!m) return null;
   const n = Number(m[1].replace(/,/g, ''));
   return Number.isFinite(n) ? n : null;
@@ -163,15 +178,39 @@ async function resolveItemIds(skus, cachePath, deadline = Infinity) {
   return cache;
 }
 
+// Strip a raw catalogifs lot down to what the consolidator needs. Keeping the full
+// record would make bricklink-lots.json ~15x larger for fields nothing reads.
+function compactLot(x) {
+  return {
+    u: x.strSellerUsername || null,          // grouping key — see header note
+    store: x.strStorename || x.strSellerUsername || null,
+    cc: (x.strSellerCountryCode || '').toUpperCase() || null,
+    usd: usd(x.mDisplaySalePrice),
+    native: x.mInvSalePrice || null,         // "EUR 135.00" — the seller's own price
+    c: x.codeComplete || null,               // 'S' sealed | 'C' complete
+    qty: x.n4Qty ?? null,
+    fb: x.n4SellerFeedbackScore ?? null,
+    minbuy: usd(x.mMinBuy),                  // null when the store has no minimum
+  };
+}
+
 /**
  * @param {string[]} skus
  * @param {object} [opts]
  * @param {string} [opts.cachePath]  where to persist the setno->itemid map
+ * @param {string} [opts.lotsPath]   where to persist per-sku lot lists for the
+ *                                   consolidator. Omit to skip lot retention
+ *                                   entirely (behaviour identical to before).
+ * @param {number} [opts.keepLots]   max lots retained per set (default 40). Beyond
+ *                                   the cheapest ~40 a seller is never going to be
+ *                                   part of a sensible basket.
  * @returns {Promise<object>} { sku: { min_isk, lots, ... } } with a .stats property
  */
 export async function scrapeBricklink(skus = [], opts = {}) {
   const all = [...new Set(skus.map(String).filter(Boolean))];
   const cachePath = opts.cachePath || new URL('../bricklink-ids.json', import.meta.url);
+  const lotsPath = opts.lotsPath || null;
+  const keepLots = opts.keepLots ?? 40;
   const maxPerRun = opts.maxPerRun ?? 45;
   const deadline = Date.now() + (opts.budgetMs ?? 8 * 60 * 1000);
   const prev = opts.prev || {};
@@ -189,9 +228,19 @@ export async function scrapeBricklink(skus = [], opts = {}) {
   const fx = await usdToIsk();
   if (!fx) console.warn('[bricklink] no USD->ISK rate; prices will be USD only');
 
+  // Lot retention merges into whatever is already on disk rather than replacing it,
+  // for the same reason carry-forward.mjs exists: a throttled run covering 12 sets
+  // must not wipe the other 90. Staleness is handled downstream — each sku carries
+  // its own fetch time and the consolidator refuses to plan on old lots.
+  let lotStore = {};
+  if (lotsPath) {
+    try { lotStore = JSON.parse(await readFile(lotsPath, 'utf8')); } catch { /* first run */ }
+  }
+
   const out = {};
   const stats = { requested: wanted.length, ofTotal: all.length, hit: 0, noLots: 0, noId: 0, error: 0, aborted: false };
   let consecutiveFails = 0;
+  let noUsername = 0;
 
   for (const sku of wanted) {
     if (Date.now() > deadline) {
@@ -246,12 +295,36 @@ export async function scrapeBricklink(skus = [], opts = {}) {
       };
       stats.hit++;
       consecutiveFails = 0;
+
+      if (lotsPath) {
+        const compact = lots.slice(0, keepLots).map(compactLot).filter((l) => l.usd != null);
+        if (compact.length && !compact.some((l) => l.u)) noUsername++;
+        lotStore[sku] = { scraped_at: out[sku].scraped_at, lots: compact };
+      }
     } catch (e) {
       stats.error++;
       consecutiveFails++;
       console.warn(`[bricklink] lots failed for ${sku}: ${e.message}`);
     }
     await sleep(REQ_DELAY + Math.random() * REQ_JITTER);
+  }
+
+  if (lotsPath) {
+    if (noUsername) {
+      // Only reachable via the Worker. If it ever compacts lots server-side it must
+      // keep strSellerUsername, or seller grouping degrades to storename and is wrong.
+      console.warn(
+        `[bricklink] ${noUsername} sets returned lots with no strSellerUsername — ` +
+        'the proxy is stripping the seller handle; consolidation will be unreliable'
+      );
+    }
+    try {
+      await writeFile(lotsPath, JSON.stringify(lotStore, null, 0));
+      const n = Object.keys(lotStore).length;
+      console.error(`[bricklink] lot store: ${n} sets on file`);
+    } catch (e) {
+      console.warn(`[bricklink] could not write lot store: ${e.message}`);
+    }
   }
 
   console.error(
@@ -272,6 +345,7 @@ export default { scrapeBricklink };
 if (import.meta.url === `file://${process.argv[1]}`) {
   const res = await scrapeBricklink(process.argv.slice(2), {
     cachePath: new URL('./bricklink-ids.json', import.meta.url),
+    lotsPath: new URL('./bricklink-lots.json', import.meta.url),
   });
   console.log(JSON.stringify(res, null, 2));
 }
