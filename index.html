@@ -27,6 +27,7 @@
     --retired: #E5675C;
     --available: #46C463;
     --rc: #29E0D2;
+    --seller: #A78BFA;
     --radius: 10px;
     --shadow: 0 1px 0 #ffffff08 inset, 0 8px 24px -12px #00000090;
   }
@@ -394,6 +395,69 @@
   .pr-row.stale { opacity: .55; }
   .pr-stale { font-size: 10px; color: var(--text-dim); font-style: italic; }
   .pb-stale { font-size: 10px; color: var(--text-dim); font-style: italic; }
+
+  /* ---- Shared sellers -------------------------------------------------
+     A seller holding several of your missing sets is one order instead of
+     three, so this gets its own colour rather than borrowing the amber that
+     already means "price". Violet reads as a lens over the grid, not a status. */
+  .chip.sel-toggle { display: inline-flex; align-items: center; gap: 5px; }
+  .chip.sel-toggle svg { width: 12px; height: 12px; }
+  .chip.sel-toggle.active { background: var(--seller); color: #1b1330; border-color: var(--seller); }
+
+  .sellers { margin: 0 0 18px; border: 1px solid var(--border); border-left: 2px solid var(--seller);
+             border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow); }
+  .sellers[hidden] { display: none; }
+  .sp-head { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; padding: 11px 14px;
+             border-bottom: 1px solid var(--border); }
+  .sp-title { font-size: 11px; letter-spacing: .09em; text-transform: uppercase; color: var(--text-dim); }
+  .sp-title b { color: var(--seller); font-weight: 600; }
+  .sp-ctls { display: flex; gap: 6px; margin-left: auto; }
+  .sp-ctls select { background: var(--surface-2); color: var(--text-dim); border: 1px solid var(--border);
+                    border-radius: 6px; padding: 4px 7px; font: inherit; font-size: 11px; }
+  .sp-list { max-height: 340px; overflow-y: auto; }
+  .sp-row { display: grid; grid-template-columns: 26px 1fr auto; gap: 10px; align-items: baseline;
+            width: 100%; text-align: left; padding: 9px 14px; background: none; border: 0;
+            border-bottom: 1px solid var(--border); color: var(--text); font: inherit; cursor: pointer; }
+  .sp-row:last-child { border-bottom: 0; }
+  .sp-row:hover { background: var(--surface-2); }
+  .sp-row:focus-visible { outline: 2px solid var(--seller); outline-offset: -2px; }
+  .sp-row.active { background: #A78BFA14; }
+  .sp-row.active .sp-store { color: var(--seller); }
+  .sp-n { font-size: 15px; font-weight: 600; color: var(--seller); text-align: right; }
+  .sp-store { font-size: 13px; font-weight: 500; }
+  .sp-where { font-size: 11px; color: var(--text-faint); }
+  .sp-sets { margin-top: 3px; display: flex; flex-wrap: wrap; gap: 4px; }
+  .sp-sku { font-size: 10px; padding: 1px 5px; border-radius: 4px; background: var(--surface-3);
+            color: var(--text-dim); }
+  .sp-sku.cheapest { color: var(--seller); background: #A78BFA1f; }
+  .sp-money { text-align: right; white-space: nowrap; }
+  .sp-sum { font-size: 13px; font-weight: 600; }
+  .sp-over { display: block; font-size: 10.5px; color: var(--text-faint); }
+  .sp-over.tight { color: var(--owned); }
+  .sp-foot { padding: 9px 14px; font-size: 11px; color: var(--text-faint); font-style: italic;
+             border-top: 1px solid var(--border); }
+  .sp-empty { padding: 18px 14px; font-size: 12px; color: var(--text-dim); }
+  .sp-clear { margin-left: 8px; padding: 2px 8px; border-radius: 5px; background: var(--surface-3);
+              border: 1px solid var(--border); color: var(--text-dim); font: inherit; font-size: 10.5px;
+              cursor: pointer; }
+  .sp-clear:hover { color: var(--text); border-color: var(--seller); }
+
+  /* The seller's own lot for this set, shown on the card while a seller lens is on. */
+  .bl-lens { display: block; margin-top: 6px; padding: 7px 11px; border: 1px solid #A78BFA55;
+             border-left: 2px solid var(--seller); border-radius: 8px; background: #A78BFA0f;
+             font-size: 11px; color: var(--text-dim); text-decoration: none; }
+  a.bl-lens:hover { border-color: var(--seller); background: #A78BFA1c; }
+  .bl-lens .lens-top { display: flex; align-items: baseline; gap: 7px; }
+  .bl-lens .lens-store { color: var(--text); font-weight: 500; }
+  .bl-lens .lens-price { margin-left: auto; font-size: 12.5px; font-weight: 600; color: var(--seller); }
+  .bl-lens .lens-rank { display: block; margin-top: 2px; color: var(--text-faint); font-size: 10.5px; }
+
+  /* Count of multi-set sellers holding this set. Sits outside the BrickLink
+     anchor so it stays independently clickable. */
+  .bl-shared { display: inline-flex; align-items: center; gap: 5px; margin-top: 6px; padding: 3px 8px;
+               border-radius: 5px; border: 1px solid #A78BFA44; background: #A78BFA10;
+               color: var(--seller); font: inherit; font-size: 10.5px; cursor: pointer; }
+  .bl-shared:hover { border-color: var(--seller); background: #A78BFA22; }
 </style>
 
 <div class="wrap">
@@ -411,13 +475,14 @@
   <div class="controls">
     <input class="search" id="search" placeholder="Search name or set number…" autocomplete="off">
     <div class="chips" id="statusChips">
-      <button class="chip active" data-status="all">All</button>
+      <button class="chip" data-status="all">All</button>
       <button class="chip" data-status="owned">Owned</button>
       <button class="chip" data-status="wishlist">Wishlist</button>
-      <button class="chip" data-status="missing">Missing</button>
+      <button class="chip active" data-status="missing">Missing</button>
     </div>
     <button class="chip buy-toggle" id="buyToggle" title="Show only sets currently in stock at one of the tracked retailers"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2 3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z"/><path d="M3 6h18"/><path d="M16 10a4 4 0 0 1-8 0"/></svg>Buyable</button>
     <button class="chip rc-toggle" id="rcToggle" title="Show only CONTROL+ remote-controlled cars"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M13 2L4.5 13.5H11l-1 8L19.5 10H13z"/></svg>RC only</button>
+    <button class="chip sel-toggle" id="sellersToggle" title="Sellers holding more than one of your missing sets"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M6 2 3 6v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2V6l-3-4z"/><path d="M3 6h18"/><path d="m9 14 2 2 4-4"/></svg>Shared sellers</button>
     <select class="ctl" id="themeFilter">
       <option value="all">All themes</option>
       <option value="Technic">Technic</option>
@@ -440,6 +505,8 @@
       <button class="ghost" id="importBtn" title="Restore from a JSON backup">Import</button>
     </div>
   </div>
+
+  <section class="sellers" id="sellersPanel" hidden></section>
 
   <div class="grid" id="grid"></div>
 
@@ -606,7 +673,7 @@ let applyingRemote = false;   // true while writing server data locally (skip pu
 async function persist(){ await sSet(KEY, JSON.stringify(SETS)); if (!applyingRemote && typeof syncSchedulePush==='function') syncSchedulePush(); }
 
 // ---------- State ----------
-let filterStatus = 'all', filterTheme = 'all', sortMode = 'year-desc', query = '', rcOnly = false, buyableOnly = false;
+let filterStatus = 'missing', filterTheme = 'all', sortMode = 'year-desc', query = '', rcOnly = false, buyableOnly = false;
 
 // ---------- Render ----------
 const grid = document.getElementById('grid');
@@ -658,6 +725,11 @@ function isBuyable(s){
 }
 
 function passes(s){
+  if (filterSeller){
+    const o = overlap();
+    const row = o.ranked.find(r => r.u === filterSeller);
+    if (!row || !row.sets.includes(s.n)) return false;
+  }
   if (buyableOnly && !isBuyable(s)) return false;
   if (rcOnly && !RC_SETS.has(s.n)) return false;
   if (filterStatus!=='all' && s.status!==filterStatus) return false;
@@ -691,12 +763,187 @@ function sortSets(arr){
   });
 }
 
+// ---------- Shared sellers ----------
+// A BrickLink lot is one seller's copy of one set. bricklink-lots.json keeps the
+// cheapest ~40 per set instead of only the winner, which is what makes it possible
+// to ask the question that actually saves money: does one seller have three of the
+// sets I'm still missing? Three lots from one store is one order, one customs
+// handling fee and one VSK assessment instead of three.
+//
+// Loaded lazily — it's a few hundred KB and most visits never open the panel.
+let LOTS = null, lotsState = 'idle';   // idle | loading | ready | error
+let sellersOpen = false, filterSeller = null, spTier = 33, spMin = 2, spFocus = null;
+let _ovCache = null, _ovKey = '';
+
+async function loadLots(){
+  if (lotsState === 'loading' || lotsState === 'ready') return;
+  lotsState = 'loading'; renderSellersPanel();
+  try{
+    const r = await fetch('bricklink-lots.json?_='+Date.now(), {cache:'no-store'});
+    LOTS = r.ok ? await r.json() : {};
+    lotsState = 'ready';
+  }catch{ LOTS = {}; lotsState = 'error'; }
+  _ovCache = null;
+  renderSellersPanel(); render();
+}
+
+// Rank is taken within the retained lots for a set, not the whole BrickLink
+// listing, so "cheapest third" is stricter than it sounds. That's the safe
+// direction: it never promotes an expensive lot, it only omits borderline ones.
+function overlap(){
+  const missing = SETS.filter(s => s.status === 'missing').map(s => s.n);
+  const key = `${spTier}|${spMin}|${missing.join(',')}|${lotsState}`;
+  if (_ovCache && _ovKey === key) return _ovCache;
+
+  const bySet = new Map(), meta = new Map(), floor = {};
+  const dates = [];
+  if (LOTS){
+    for (const sku of missing){
+      const rec = LOTS[sku];
+      if (!rec || !Array.isArray(rec.lots) || !rec.lots.length) continue;
+      const per = new Map();
+      for (const l of rec.lots){
+        if (!l.u || l.usd == null) continue;
+        const cur = per.get(l.u);
+        if (!cur || l.usd < cur.usd) per.set(l.u, l);
+        const m = meta.get(l.u);
+        if (!m || (l.fb||0) > (m.fb||0)) meta.set(l.u, { store: l.store || l.u, cc: l.cc, fb: l.fb, minbuy: l.minbuy });
+      }
+      if (!per.size) continue;
+      const ordered = [...per.entries()].sort((a,b) => a[1].usd - b[1].usd);
+      const n = ordered.length, low = ordered[0][1].usd;
+      const ranks = new Map();
+      ordered.forEach(([u,l],i) => ranks.set(u, { rank: i+1, of: n, pct: n>1 ? Math.round(i/(n-1)*100) : 0, over: l.usd - low }));
+      floor[sku] = { usd: low, u: ordered[0][0] };
+      bySet.set(sku, { per, ranks });
+      if (rec.scraped_at) dates.push(rec.scraped_at);
+    }
+  }
+
+  const grouped = new Map();
+  for (const [sku, { per, ranks }] of bySet){
+    for (const [u, l] of per){
+      if (ranks.get(u).pct > spTier) continue;
+      if (!grouped.has(u)) grouped.set(u, {});
+      grouped.get(u)[sku] = l;
+    }
+  }
+
+  const ranked = [];
+  for (const [u, sets] of grouped){
+    const skus = Object.keys(sets).sort();
+    if (skus.length < spMin) continue;
+    const usd = skus.reduce((a,s) => a + sets[s].usd, 0);
+    const fl  = skus.reduce((a,s) => a + floor[s].usd, 0);
+    const m = meta.get(u) || {};
+    ranked.push({
+      u, store: m.store || u, cc: m.cc || '', fb: m.fb ?? null, minbuy: m.minbuy ?? null,
+      sets: skus, lots: sets, usd, floorUsd: fl,
+      overPct: fl > 0 ? (usd - fl) / fl * 100 : 0,
+      cheapest: skus.filter(s => floor[s].u === u),
+    });
+  }
+  // Coverage first, then how far over the per-set floor the basket sits. Two
+  // sellers with the same set count are separated by price, not by luck of which
+  // sets they happen to stock.
+  ranked.sort((a,b) => b.sets.length - a.sets.length || a.overPct - b.overPct || a.usd - b.usd);
+
+  const shared = {};
+  for (const r of ranked) for (const s of r.sets) shared[s] = (shared[s] || 0) + 1;
+
+  _ovKey = key;
+  _ovCache = {
+    ranked, floor, bySet, shared,
+    considered: bySet.size,
+    missing: missing.length,
+    oldest: dates.length ? dates.slice().sort()[0] : null,
+  };
+  return _ovCache;
+}
+
+const kr = usd => (FX_USD ? `${fmt(Math.round(usd * FX_USD))} kr` : `$${usd.toFixed(2)}`);
+
+function renderSellersPanel(){
+  const el = document.getElementById('sellersPanel');
+  el.hidden = !sellersOpen;
+  if (!sellersOpen) return;
+
+  if (lotsState === 'loading'){ el.innerHTML = `<div class="sp-empty">Loading lots…</div>`; return; }
+  if (lotsState === 'error'){
+    el.innerHTML = `<div class="sp-empty">Couldn't read bricklink-lots.json. It's written by the daily price run — if this is a fresh checkout it may not exist yet.</div>`;
+    return;
+  }
+
+  const o = overlap();
+  const rows = spFocus ? o.ranked.filter(r => r.sets.includes(spFocus)) : o.ranked;
+
+  const head = `<div class="sp-head">
+    <span class="sp-title">Sellers with <b>${spMin}+</b> of your missing sets${spFocus ? ` · holding #${spFocus}` : ''}</span>
+    ${spFocus ? `<button class="sp-clear" data-sp="unfocus">Show all sellers</button>` : ''}
+    ${filterSeller ? `<button class="sp-clear" data-sp="unfilter">Clear grid filter</button>` : ''}
+    <span class="sp-ctls">
+      <select id="spTier" title="How cheap a seller's lot has to be to count for a set">
+        <option value="20"${spTier==20?' selected':''}>Cheapest 20%</option>
+        <option value="33"${spTier==33?' selected':''}>Cheapest third</option>
+        <option value="50"${spTier==50?' selected':''}>Cheaper half</option>
+        <option value="100"${spTier==100?' selected':''}>Any price</option>
+      </select>
+      <select id="spMin" title="Minimum sets a seller must hold">
+        <option value="2"${spMin==2?' selected':''}>2+ sets</option>
+        <option value="3"${spMin==3?' selected':''}>3+ sets</option>
+        <option value="4"${spMin==4?' selected':''}>4+ sets</option>
+      </select>
+    </span>
+  </div>`;
+
+  let body;
+  if (!o.considered){
+    body = `<div class="sp-empty">No lot data for your missing sets yet. The daily run fills this in a few dozen sets at a time, so give it a couple of days — or run <code>node tracker/bricklink-adapter.mjs &lt;set numbers&gt;</code> to fetch them now.</div>`;
+  } else if (!rows.length){
+    body = `<div class="sp-empty">No seller holds ${spMin} of these sets at that price tier. Try a wider tier or drop to 2+ sets.</div>`;
+  } else {
+    body = `<div class="sp-list">` + rows.slice(0, 40).map(r => {
+      const on = filterSeller === r.u ? ' active' : '';
+      const tight = r.overPct < 5 ? ' tight' : '';
+      const fb = r.fb != null ? ` · ${fmt(r.fb)} feedback` : '';
+      const mb = (r.minbuy && r.usd < r.minbuy) ? ` · under min buy` : '';
+      const chips = r.sets.map(n => {
+        const set = SETS.find(x => x.n === n);
+        const best = r.cheapest.includes(n) ? ' cheapest' : '';
+        return `<span class="sp-sku${best}" title="${escapeHTML(set ? set.name : n)}">#${n}</span>`;
+      }).join('');
+      return `<button class="sp-row${on}" data-seller="${escapeHTML(r.u)}">
+        <span class="sp-n">${r.sets.length}</span>
+        <span>
+          <span class="sp-store">${escapeHTML(r.store)}</span>
+          <span class="sp-where"> · ${r.cc}${fb}${mb}</span>
+          <span class="sp-sets">${chips}</span>
+        </span>
+        <span class="sp-money">
+          <span class="sp-sum">${kr(r.usd)}</span>
+          <span class="sp-over${tight}">${r.overPct < 0.05 ? 'at the floor' : `+${r.overPct.toFixed(1)}% over floor`}</span>
+        </span>
+      </button>`;
+    }).join('') + `</div>`;
+  }
+
+  const when = o.oldest ? staleDate(o.oldest) : '';
+  const foot = `<div class="sp-foot">Item prices only, no shipping or VSK ·
+    ${o.considered} of ${o.missing} missing sets have lots${when ? ` · oldest fetched ${when}` : ''} ·
+    pick a seller to filter the grid</div>`;
+
+  el.innerHTML = head + body + foot;
+}
+
 function render(){
   renderTelemetry();
   renderThemeBar();
+  renderSellersPanel();
   const list = sortSets(SETS.filter(passes));
   if (!list.length){
-    grid.innerHTML = `<div class="empty" style="grid-column:1/-1"><h3>Nothing here yet</h3><p>Try a different filter, or add a set that isn't in the catalog.</p></div>`;
+    grid.innerHTML = filterSeller
+      ? `<div class="empty" style="grid-column:1/-1"><h3>Nothing matches</h3><p>This seller's sets are filtered out by the other controls. Clear the theme, search or Buyable filter to see them.</p></div>`
+      : `<div class="empty" style="grid-column:1/-1"><h3>Nothing here yet</h3><p>Try a different filter, or add a set that isn't in the catalog.</p></div>`;
     return;
   }
   grid.innerHTML = list.map(cardHTML).join('');
@@ -803,9 +1050,35 @@ function bricklinkBlockHTML(s){
       <span class="bl-note">án sendingar og VSK</span>
       ${save}
     </div>`;
-  return b.url
+  return (b.url
     ? `<a class="bl-box" href="${b.url}" target="_blank" rel="noopener" title="Skoða á BrickLink">${inner}</a>`
-    : `<div class="bl-box">${inner}</div>`;
+    : `<div class="bl-box">${inner}</div>`) + sellerLensHTML(s) + sharedBadgeHTML(s);
+}
+
+// While a seller lens is on, every visible card shows that seller's own lot rather
+// than making you cross-reference the panel against the cheapest-lot box above.
+function sellerLensHTML(s){
+  if (!filterSeller || !LOTS) return '';
+  const o = overlap();
+  const row = o.ranked.find(r => r.u === filterSeller);
+  const l = row && row.lots[s.n];
+  if (!l) return '';
+  const rk = o.bySet.get(s.n)?.ranks.get(filterSeller);
+  const over = rk && rk.over > 0.005 ? `${kr(rk.over)} over the cheapest lot` : 'cheapest lot for this set';
+  const place = rk ? `#${rk.rank} of ${rk.of} sellers · ${over}` : over;
+  return `<a class="bl-lens" href="https://store.bricklink.com/${encodeURIComponent(filterSeller)}?q=${s.n}"
+      target="_blank" rel="noopener" title="Open this set in the seller's store">
+    <span class="lens-top"><span class="lens-store">${escapeHTML(row.store)}</span>
+      <span class="lens-price">${kr(l.usd)}</span></span>
+    <span class="lens-rank">${l.c === 'S' ? 'sealed' : 'complete'}${l.qty > 1 ? ` · ${l.qty} available` : ''} · ${place}</span>
+  </a>`;
+}
+
+function sharedBadgeHTML(s){
+  if (!LOTS || filterSeller) return '';
+  const n = overlap().shared[s.n] || 0;
+  if (!n) return '';
+  return `<button class="bl-shared" data-act="shared" title="Sellers who also hold other sets you're missing">${n} shared seller${n>1?'s':''}</button>`;
 }
 
 function priceBlockHTML(s){
@@ -855,6 +1128,14 @@ grid.addEventListener('click', async (e)=>{
   const s = SETS.find(x=>x.n===n); if(!s) return;
   const act = e.target.closest('[data-act]')?.dataset.act;
 
+  if (act==='shared'){
+    spFocus = n; sellersOpen = true;
+    document.getElementById('sellersToggle').classList.add('active');
+    renderSellersPanel();
+    document.getElementById('sellersPanel').scrollIntoView({ behavior:'smooth', block:'nearest' });
+    loadLots();
+    return;
+  }
   if (act==='status'){
     const val = e.target.closest('[data-act]').dataset.val;
     s.status = val;
@@ -906,6 +1187,43 @@ document.getElementById('rcToggle').addEventListener('click',(e)=>{
 document.getElementById('buyToggle').addEventListener('click',(e)=>{
   buyableOnly = !buyableOnly;
   e.currentTarget.classList.toggle('active', buyableOnly);
+  render();
+});
+
+// ---- Shared sellers panel ----
+document.getElementById('sellersToggle').addEventListener('click',(e)=>{
+  sellersOpen = !sellersOpen;
+  e.currentTarget.classList.toggle('active', sellersOpen);
+  if (!sellersOpen){ spFocus = null; setSellerFilter(null); }
+  renderSellersPanel();
+  if (sellersOpen) loadLots();
+});
+
+// Selecting a seller is a lens over the missing sets, so it forces the status
+// filter back to Missing — otherwise picking a seller while "Owned" is active
+// silently yields an empty grid.
+function setSellerFilter(u){
+  filterSeller = u;
+  if (u){
+    filterStatus = 'missing';
+    document.querySelectorAll('#statusChips .chip').forEach(c=>c.classList.toggle('active', c.dataset.status==='missing'));
+  }
+  render();
+}
+
+document.getElementById('sellersPanel').addEventListener('click',(e)=>{
+  const act = e.target.closest('[data-sp]')?.dataset.sp;
+  if (act === 'unfocus'){ spFocus = null; renderSellersPanel(); return; }
+  if (act === 'unfilter'){ setSellerFilter(null); return; }
+  const row = e.target.closest('.sp-row'); if (!row) return;
+  setSellerFilter(filterSeller === row.dataset.seller ? null : row.dataset.seller);
+});
+document.getElementById('sellersPanel').addEventListener('change',(e)=>{
+  if (e.target.id === 'spTier') spTier = Number(e.target.value);
+  else if (e.target.id === 'spMin') spMin = Number(e.target.value);
+  else return;
+  // The chosen seller may not survive a tighter tier.
+  if (filterSeller && !overlap().ranked.some(r => r.u === filterSeller)) filterSeller = null;
   render();
 });
 
@@ -1172,5 +1490,9 @@ if (syncOn()){
     }
   }catch{}
   await syncPull();
+  // Lot store is a few hundred KB and only powers the shared-seller cues, so it
+  // loads after first paint rather than blocking it.
+  if (typeof requestIdleCallback === 'function') requestIdleCallback(()=>loadLots(), { timeout: 4000 });
+  else setTimeout(loadLots, 2000);
 })();
 </script>
