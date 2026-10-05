@@ -54,6 +54,9 @@ async function getProducts(url) {
       if (res.status === 429) throw new RateLimited('HTTP 429');
       if (!res.ok) throw new FetchFailure(`HTTP ${res.status}`);
       const html = await res.text();
+      // Zero hits: the shop 302s to /search/no-result and serves a 200 page with no products
+      // array. That is a genuine "not stocked", so return [] (a miss), don't retry as a block.
+      if (/\/search\/no-result/.test(res.url || '') || html.includes('SearchNoResultsPage')) return [];
       const products = extractProducts(html);
       // HTTP 200 with no products array = soft block / challenge page. Retry it
       // rather than recording a false "not stocked".
