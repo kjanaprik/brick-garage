@@ -447,6 +447,8 @@
   .sp-sku.cheapest { color: var(--seller); background: #A78BFA1f; }
   .sp-money { text-align: right; white-space: nowrap; }
   .sp-sum { font-size: 13px; font-weight: 600; }
+  .eur { font-size: .78em; font-weight: 400; color: var(--text-faint); letter-spacing: 0; text-transform: none; white-space: nowrap; margin-left: 4px; }
+  .bl-head .bl-price .eur { color: var(--text-dim); }
   .sp-over { display: block; font-size: 10.5px; color: var(--text-faint); }
   .sp-over.tight { color: var(--owned); }
   .sp-foot { padding: 9px 14px; font-size: 11px; color: var(--text-faint); font-style: italic;
@@ -951,6 +953,24 @@ function overlap(){
 
 const kr = usd => (FX_USD ? `${fmt(Math.round(usd * FX_USD))} kr` : `$${usd.toFixed(2)}`);
 
+// ---------- EUR figures ----------
+// A lot listed in EUR keeps its exact price; anything else is converted from USD at mid-market ("≈").
+function lotEur(l){
+  if (!l) return null;
+  const m = String(l.native || '').match(/^EUR\s*([\d.,]+)$/);
+  if (m){ const n = Number(m[1].replace(/,/g, '')); if (Number.isFinite(n)) return { v: n, exact: true }; }
+  if (l.usd != null && FX_USD && FX_EUR) return { v: l.usd * FX_USD / FX_EUR, exact: false };
+  return null;
+}
+function sumEur(lots){
+  let v = 0, exact = true;
+  for (const l of lots){ const e = lotEur(l); if (!e) return null; v += e.v; exact = exact && e.exact; }
+  return { v, exact };
+}
+const eur2 = n => n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+const eurSpan = e => e ? `<span class="eur" title="${e.exact ? 'Listed price in EUR' : 'Converted from the lot\'s currency at mid-market'}">(${e.exact ? '' : '≈ '}€${eur2(e.v)})</span>` : '';
+const bsEurSpan = v => v != null ? `<span class="eur" title="Brickshop price excl. 21% Dutch VAT, before shipping and import VAT">(€${eur2(v)} ex VAT)</span>` : '';
+
 function renderSellersPanel(){
   const el = document.getElementById('sellersPanel');
   el.hidden = !sellersOpen;
@@ -1008,7 +1028,7 @@ function renderSellersPanel(){
           <span class="sp-sets">${chips}</span>
         </span>
         <span class="sp-money">
-          <span class="sp-sum">${kr(r.usd)}</span>
+          <span class="sp-sum">${kr(r.usd)}${eurSpan(sumEur(Object.values(r.lots)))}</span>
           <span class="sp-over${tight}">${r.overPct < 0.05 ? 'at the floor' : `+${r.overPct.toFixed(1)}% over floor`}</span>
         </span>
       </button>`;
@@ -1091,6 +1111,7 @@ let PRICES = {};
 let PROD_AUTO = {};   // sku -> 'available'|'retired', auto-filled from Brickset via prices.json
 let BRICKLINK = {};   // sku -> cheapest sealed/complete EU lot that ships to Iceland
 let FX_USD = null;    // USD -> ISK, for the BrickLink panel
+let FX_EUR = null;    // EUR -> ISK (mid-market), for the EUR figures
 function applyAutoProd(){ for (const s of SETS){ if (PROD_AUTO && PROD_AUTO[s.n]) s.prod = PROD_AUTO[s.n]; } }
 const SHOP_ORDER = ['Kubbabúðin','Coolshop','Boozt','Booztlet','Kids-world','ELKO','Trekk','Brickshop'];
 // Rows carried over from an earlier run (a retailer's scrape failed or was throttled)
@@ -1130,8 +1151,10 @@ function bricklinkBlockHTML(s){
     : '';
 
   const seller = b.seller ? `<span class="bl-seller">${b.seller}</span>` : '';
-  const native = b.native ? ` · ${tidyNative(b.native)}` : '';
-  const inner = `<div class="bl-head">BrickLink${stale}<span class="bl-price">${fmt(b.min_isk)} kr</span><span class="bl-go">↗</span></div>
+  const blEur = lotEur({ native: b.native, usd: b.min_usd });
+  // EUR now leads the headline; the native line stays for lots listed in another currency.
+  const native = b.native && !/^EUR\b/.test(b.native) ? ` · ${tidyNative(b.native)}` : '';
+  const inner = `<div class="bl-head">BrickLink${stale}<span class="bl-price">${fmt(b.min_isk)} kr${eurSpan(blEur)}</span><span class="bl-go">↗</span></div>
     <div class="bl-meta">
       ${cond}${where ? ' · ' + where : ''}${others}<br>
       ${seller}${native}
@@ -1145,6 +1168,15 @@ function bricklinkBlockHTML(s){
 
 // While a seller lens is on, every visible card shows that seller's own lot rather
 // than making you cross-reference the panel against the cheapest-lot box above.
+// Store page with the set search already run. The store front end reads its search state from the
+// URL hash (#/shop?o={...}); ?q= alone only pre-fills the search box. showHomeItems:0 skips the
+// "Featured" home view so the result list is what you land on.
+function sellerLotUrl(u, sku){
+  // Same shape BrickLink produces itself: only the quotes are percent-encoded in the hash.
+  const o = JSON.stringify({ q: String(sku), sort: 0, pgSize: 100, showHomeItems: 0 }).replace(/"/g, '%22');
+  return `https://store.bricklink.com/${encodeURIComponent(u)}?q=${encodeURIComponent(sku)}#/shop?o=${o}`;
+}
+
 function sellerLensHTML(s){
   if (!filterSeller || !LOTS) return '';
   const o = overlap();
@@ -1154,10 +1186,10 @@ function sellerLensHTML(s){
   const rk = o.bySet.get(s.n)?.ranks.get(filterSeller);
   const over = rk && rk.over > 0.005 ? `${kr(rk.over)} over the cheapest lot` : 'cheapest lot for this set';
   const place = rk ? `#${rk.rank} of ${rk.of} sellers · ${over}` : over;
-  return `<a class="bl-lens" href="https://store.bricklink.com/${encodeURIComponent(filterSeller)}?q=${s.n}"
+  return `<a class="bl-lens" href="${sellerLotUrl(filterSeller, s.n)}"
       target="_blank" rel="noopener" title="Open this set in the seller's store">
     <span class="lens-top"><span class="lens-store">${escapeHTML(row.store)}</span>
-      <span class="lens-price">${kr(l.usd)}</span></span>
+      <span class="lens-price">${kr(l.usd)}${eurSpan(lotEur(l))}</span></span>
     <span class="lens-rank">${l.c === 'S' ? 'sealed' : 'complete'}${l.qty > 1 ? ` · ${l.qty} available` : ''} · ${place}</span>
   </a>`;
 }
@@ -1180,7 +1212,7 @@ function priceBlockHTML(s){
       const sd = d.stale ? staleDate(d.since) : '';
       const stale = d.stale ? `<span class="pr-stale"> · ${sd || 'ekki uppfært'}</span>` : '';
       const tip = d.stale ? ` title="Verð frá ${sd || 'fyrri keyrslu'} — náðist ekki að uppfæra í dag"` : '';
-      const inner = `<span class="pr-shop">${sh}${stale}</span><span class="pr-nums"><span class="pr-val ${d.sale?'sale':''}">${fmt(d.p)} kr${was}</span>${bundled}</span>`;
+      const inner = `<span class="pr-shop">${sh}${stale}</span><span class="pr-nums"><span class="pr-val ${d.sale?'sale':''}">${fmt(d.p)} kr${sh==='Brickshop' ? bsEurSpan(d.eur) : ''}${was}</span>${bundled}</span>`;
       return d.url
         ? `<a class="pr-row ${cls}" href="${d.url}" target="_blank" rel="noopener"${tip}>${inner}<span class="pr-go">↗</span></a>`
         : `<div class="pr-row ${cls}"${tip}>${inner}</div>`;
@@ -1188,7 +1220,7 @@ function priceBlockHTML(s){
     const best = p.shops[p.shop];
     const bestStale = best && best.stale ? `<span class="pb-stale"> · ${staleDate(best.since) || 'ekki uppfært'}</span>` : '';
     return `<details class="price-box">
-      <summary><span class="pb-lead">Cheapest</span><span class="pb-price ${p.on_sale?'sale':''}">${fmt(p.cheapest)} kr</span><span class="pb-shop">${p.shop}${p.on_sale?' · sale':''}${bestStale}</span></summary>
+      <summary><span class="pb-lead">Cheapest</span><span class="pb-price ${p.on_sale?'sale':''}">${fmt(p.cheapest)} kr${p.shop==='Brickshop' && best ? bsEurSpan(best.eur) : ''}</span><span class="pb-shop">${p.shop}${p.on_sale?' · sale':''}${bestStale}</span></summary>
       <div class="pr-list">${rows}</div></details>`;
   }
   // fallback: static Brickshop estimate until prices.json is available
@@ -1621,7 +1653,7 @@ if (syncOn()){
       const d = await r.json();
       PRICES = d.sets||{};
       BRICKLINK = d.bricklink||{};
-      FX_USD = d.fx_usd||null;
+      FX_USD = d.fx_usd||null; FX_EUR = d.fx||null;
       window.PRICES_META={updated:d.updated,fx:d.fx,fx_usd:d.fx_usd};
       if (d.prod){ PROD_AUTO = d.prod; applyAutoProd(); }
       render(); renderTelemetry();
