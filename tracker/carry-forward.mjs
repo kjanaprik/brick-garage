@@ -28,6 +28,7 @@ export function prevRowsFor(prevSets, label, since = null) {
       in_stock: !!shop.stock,
       url: shop.url ?? null,
       ...(shop.bundled != null ? { bundled_isk: shop.bundled } : {}),
+      ...(shop.eur != null ? { eur_ex_vat: shop.eur } : {}),
       ...(entry.pieces != null ? { pieces: entry.pieces } : {}),
       stale: true,
       stale_since: since,

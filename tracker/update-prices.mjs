@@ -255,6 +255,7 @@ async function main() {
       p: r.price_isk, sale: !!r.on_sale, was: r.rrp_isk ?? null,
       stock: r.in_stock !== false, url: r.url || null,
       ...(label === 'Brickshop' && r.bundled_isk != null ? { bundled: r.bundled_isk } : {}),
+      ...(label === 'Brickshop' && r.eur_ex_vat != null ? { eur: r.eur_ex_vat } : {}),
       ...(r.stale ? { stale: true, since: r.stale_since || null } : {}),
     };
     if (r.pieces && !e.pieces) e.pieces = r.pieces;   // real piece count (from Brickshop spec table)

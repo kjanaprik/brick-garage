@@ -245,6 +245,7 @@ function parseProduct(html, sku, path) {
     base_eur,                       // pre-discount EUR (incl. NL VAT), null if not on sale
     discount_pct,                   // % off vs base, 0 if not on sale
     bundled_isk,                    // landed price when bundled in a larger order
+    eur_ex_vat: price_eur == null ? null : Math.round(price_eur / EU_VAT * 100) / 100,   // listed EUR price minus Dutch VAT (goods only)
     pieces,                         // piece count from the spec table (or null)
   };
 }
