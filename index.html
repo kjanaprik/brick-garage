@@ -735,9 +735,17 @@ const THEME_MIGRATION = (() => {
 })();
 
 // Only ever touches sets whose theme is "Other"; a theme you chose yourself is left alone.
+const THEME_ALIASES = [[/jurassic/i, 'Jurassic World'], [/creator expert/i, 'Icons']];
 function applyAutoTheme(){
   let changed = false;
   for (const s of SETS){
+    if (s.theme && !THEME_ORDER.includes(s.theme)){
+      // A theme name we don't list (e.g. Brickset's "Jurassic Park"): map it if we can, else leave it visible as-is.
+      const a = THEME_ALIASES.find(([re]) => re.test(s.theme));
+      const t = THEME_MIGRATION[s.n] || (a && a[1]);
+      if (t){ s.theme = t; changed = true; }
+      continue;
+    }
     if (s.theme && s.theme !== 'Other') continue;
     const t = THEME_MIGRATION[s.n] || guessTheme(s.n, s.name);
     if (t && t !== s.theme){ s.theme = t; changed = true; }
@@ -766,8 +774,23 @@ function renderTelemetry(){
   `;
 }
 
+function syncThemeFilterOptions(extras){
+  const sel = document.getElementById('themeFilter'); if (!sel) return;
+  const known = new Set(THEME_ORDER);
+  [...sel.options].forEach(o => { if (o.value !== 'all' && !known.has(o.value) && !extras.includes(o.value)) o.remove(); });
+  const have = new Set([...sel.options].map(o => o.value));
+  const other = [...sel.options].find(o => o.value === 'Other') || null;
+  extras.forEach(t => {
+    if (have.has(t)) return;
+    const o = document.createElement('option'); o.value = t; o.textContent = t;
+    sel.insertBefore(o, other);
+  });
+  sel.value = filterTheme;
+}
 function renderThemeBar(){
-  const order=THEME_ORDER;
+  const extras=[...new Set(SETS.map(s=>s.theme).filter(t=>t && !THEME_ORDER.includes(t)))].sort();
+  const order=[...THEME_ORDER.slice(0,-1), ...extras, 'Other'];
+  syncThemeFilterOptions(extras);
   const present=order.filter(t=>SETS.some(s=>s.theme===t));
   themeBar.style.gridTemplateColumns='repeat(auto-fit,minmax(150px,1fr))';
   themeBar.innerHTML = present.map(t=>{
