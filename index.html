@@ -254,6 +254,21 @@
   .theme-tag.Technic { color: #e08a3c; }
   .theme-tag.Speed { color: #4DA3FF; }
   .theme-tag.Icons { color: #b57edc; }
+  .theme-tag.Ideas { color: #3fc1b0; }
+  .theme-tag.Racers { color: #e5484d; }
+  .theme-tag.Batman { color: #f2c230; }
+  .theme-tag.Architecture { color: #8fa3b8; }
+  .theme-tag.Jurassic { color: #7bc043; }
+  .theme-stat.Ideas { border-left-color: #3fc1b0; }
+  .theme-stat.Racers { border-left-color: #e5484d; }
+  .theme-stat.Batman { border-left-color: #f2c230; }
+  .theme-stat.Architecture { border-left-color: #8fa3b8; }
+  .theme-stat.Jurassic { border-left-color: #7bc043; }
+  .theme-stat.Ideas .ts-name { color: #3fc1b0; }
+  .theme-stat.Racers .ts-name { color: #e5484d; }
+  .theme-stat.Batman .ts-name { color: #f2c230; }
+  .theme-stat.Architecture .ts-name { color: #8fa3b8; }
+  .theme-stat.Jurassic .ts-name { color: #7bc043; }
 
   .plate {
     font-family: 'JetBrains Mono', monospace; font-size: 11px; font-weight: 500;
@@ -488,6 +503,11 @@
       <option value="Technic">Technic</option>
       <option value="Speed Champions">Speed Champions</option>
       <option value="Icons">Icons</option>
+      <option value="Ideas">Ideas</option>
+      <option value="Racers">Racers</option>
+      <option value="Batman">Batman</option>
+      <option value="Architecture">Architecture</option>
+      <option value="Jurassic World">Jurassic World</option>
       <option value="Other">Other</option>
     </select>
     <select class="ctl" id="sort">
@@ -501,6 +521,7 @@
     </select>
     <div class="toolbar-right">
       <button class="action" id="addBtn">+ Add set</button>
+      <button class="ghost" id="blWantedBtn" title="Copy BrickLink wanted-list XML for the missing sets currently shown, and open BrickLink's upload page">BL wanted</button>
       <button class="ghost" id="exportBtn" title="Download your collection as JSON">Export</button>
       <button class="ghost" id="importBtn" title="Restore from a JSON backup">Import</button>
     </div>
@@ -538,7 +559,7 @@
       <div class="field">
         <label>Theme</label>
         <select id="f-theme">
-          <option>Technic</option><option>Speed Champions</option><option>Icons</option><option>Other</option>
+          <option>Technic</option><option>Speed Champions</option><option>Icons</option><option>Ideas</option><option>Racers</option><option>Batman</option><option>Architecture</option><option>Jurassic World</option><option>Other</option>
         </select>
       </div>
       <div class="field"><label>Pieces</label><input id="f-pieces" type="number" placeholder="optional"></div>
@@ -667,6 +688,7 @@ async function load(){
     }
     await sSet(IMPORT_FLAG_4, '1');
   }
+  applyAutoTheme();
   await persist();
 }
 let applyingRemote = false;   // true while writing server data locally (skip push to avoid echo)
@@ -679,7 +701,50 @@ let filterStatus = 'missing', filterTheme = 'all', sortMode = 'year-desc', query
 const grid = document.getElementById('grid');
 const telemetry = document.getElementById('telemetry');
 const themeBar = document.getElementById('themeBar');
-const themeClass = t => t==='Speed Champions' ? 'Speed' : (t==='Technic'?'Technic':(t==='Icons'?'Icons':'Other'));
+// ---------- Themes ----------
+const THEME_ORDER = ['Technic','Speed Champions','Icons','Ideas','Racers','Batman','Architecture','Jurassic World','Other'];
+const THEME_CLASS = {'Speed Champions':'Speed', 'Jurassic World':'Jurassic'};
+const themeClass = t => THEME_ORDER.includes(t) ? (THEME_CLASS[t] || t) : 'Other';
+let themeLocked = false;   // true once the theme in the add-set modal came from Brickset or the user
+
+// Confident guesses only (set number ranges + names). Returns null when unsure.
+function guessTheme(num, name){
+  const n = String(num||'').trim(), nm = String(name||'');
+  if (/batman|batmobile|tumbler/i.test(nm)) return 'Batman';
+  if (/jurassic/i.test(nm)) return 'Jurassic World';
+  if (/^42\d{3}$/.test(n)) return 'Technic';
+  if (/^210\d{2}$/.test(n)) return 'Architecture';
+  if (/^21\d{3}$/.test(n)) return 'Ideas';
+  if (/^10\d{3}$/.test(n)) return 'Icons';
+  return null;
+}
+
+// Explicit re-theme of sets that were added while everything unknown became "Other".
+const THEME_MIGRATION = (() => {
+  const g = {
+    'Racers': ['8143','8145','8156','8169','8214','8652','8653','8671','30192','30193','30194','30195','40191','40192','40193'],
+    'Architecture': ['21058','21060','21061','21062','21063','21065','21067'],
+    'Ideas': ['21103','21108','21303','21306','21307','21319','21320','21327','21328','21330','21333','21335','21336','21350','21351','21369','21371','21375'],
+    'Batman': ['7784','40433','76023','76139','76240','76303','76304','76328','76331','76332'],
+    'Jurassic World': ['75936','76956','76968','77984'],
+    'Icons': ['10181','10189']
+  };
+  const m = {};
+  for (const [t, nums] of Object.entries(g)) for (const n of nums) m[n] = t;
+  return m;
+})();
+
+// Only ever touches sets whose theme is "Other"; a theme you chose yourself is left alone.
+function applyAutoTheme(){
+  let changed = false;
+  for (const s of SETS){
+    if (s.theme && s.theme !== 'Other') continue;
+    const t = THEME_MIGRATION[s.n] || guessTheme(s.n, s.name);
+    if (t && t !== s.theme){ s.theme = t; changed = true; }
+  }
+  if (changed && typeof syncSchedulePush === 'function') setTimeout(syncSchedulePush, 0);
+  return changed;
+}
 
 function fmt(n){ return n==null ? '—' : n.toLocaleString('en-US'); }
 
@@ -702,9 +767,9 @@ function renderTelemetry(){
 }
 
 function renderThemeBar(){
-  const order=['Technic','Speed Champions','Icons','Other'];
+  const order=THEME_ORDER;
   const present=order.filter(t=>SETS.some(s=>s.theme===t));
-  themeBar.style.gridTemplateColumns=`repeat(${present.length},1fr)`;
+  themeBar.style.gridTemplateColumns='repeat(auto-fit,minmax(150px,1fr))';
   themeBar.innerHTML = present.map(t=>{
     const all=SETS.filter(s=>s.theme===t);
     const owned=all.filter(s=>s.status==='owned').length;
@@ -1232,17 +1297,29 @@ const modalBg=document.getElementById('modalBg');
 document.getElementById('addBtn').onclick=()=>{ modalBg.classList.add('open'); document.getElementById('bs-search').focus(); };
 document.getElementById('cancelBtn').onclick=closeModal;
 modalBg.addEventListener('click',e=>{ if(e.target===modalBg) closeModal(); });
-function closeModal(){ modalBg.classList.remove('open'); ['bs-search','f-name','f-num','f-year','f-pieces'].forEach(id=>document.getElementById(id).value=''); bsCloseResults(); }
+// Typing a set number or name fills the theme when we can tell; Brickset picks and manual theme choices win.
+function autoThemeFromForm(){
+  if (themeLocked) return;
+  const t = guessTheme(document.getElementById('f-num').value, document.getElementById('f-name').value);
+  if (t) document.getElementById('f-theme').value = t;
+}
+['f-num','f-name'].forEach(id => document.getElementById(id).addEventListener('input', autoThemeFromForm));
+document.getElementById('f-theme').addEventListener('change', () => { themeLocked = true; });
+function closeModal(){ themeLocked = false; modalBg.classList.remove('open'); ['bs-search','f-name','f-num','f-year','f-pieces'].forEach(id=>document.getElementById(id).value=''); bsCloseResults(); }
 
 // ---- Brickset autocomplete (via Worker proxy; key stays server-side) ----
 const bsInput = document.getElementById('bs-search');
 const bsBox   = document.getElementById('bs-results');
-const THEME_OPTS = ['Technic','Speed Champions','Icons','Other'];
-function bsMapTheme(t){
-  if(!t) return 'Other';
-  if(THEME_OPTS.includes(t)) return t;
-  if(/creator expert/i.test(t)) return 'Icons';   // older Brickset label for Icons
-  return 'Other';
+const THEME_OPTS = THEME_ORDER;
+function bsMapTheme(t, name, num){
+  if (t){
+    if (THEME_OPTS.includes(t)) return t;
+    if (/creator expert/i.test(t)) return 'Icons';   // older Brickset label for Icons
+    if (/batman/i.test(t)) return 'Batman';
+    if (/jurassic/i.test(t)) return 'Jurassic World';
+    if (/^dc\b|super heroes/i.test(t) && /batman|batmobile|tumbler/i.test(name||'')) return 'Batman';
+  }
+  return guessTheme(num, name) || 'Other';
 }
 let bsResults = [], bsActive = -1, bsTimer = null, bsSeq = 0;
 const bsCache = new Map();
@@ -1264,7 +1341,7 @@ function bsPick(i){
   document.getElementById('f-num').value    = r.num  || '';
   document.getElementById('f-year').value   = r.year || '';
   document.getElementById('f-pieces').value = r.pieces || '';
-  document.getElementById('f-theme').value  = bsMapTheme(r.theme);
+  document.getElementById('f-theme').value  = bsMapTheme(r.theme, r.name, r.num); themeLocked = true;
   document.getElementById('f-prod').value   = r.prod === 'retired' ? 'retired' : 'available';
   bsInput.value = '';
   bsCloseResults();
@@ -1322,6 +1399,44 @@ document.getElementById('saveBtn').onclick=async ()=>{
     status:'missing', pricePaid:null, userNotes:'', custom:true
   };
   SETS.push(s); await persist(); closeModal(); render();
+};
+
+// ---------- BrickLink wanted-list export ----------
+// Builds BrickLink XML for the MISSING sets that match the current theme /
+// search / in-stock / RC / seller filters (status filter is ignored, so this
+// works from any status tab). No MINQTY on purpose: per BrickLink's upload
+// rules an item already on the list is skipped when no wanted qty is given,
+// so re-uploading never stacks quantities.
+function blWantedSets(){
+  const prev = filterStatus;
+  filterStatus = 'missing';
+  try { return SETS.filter(passes).sort((a,b)=>String(a.n).localeCompare(String(b.n), undefined, {numeric:true})); }
+  finally { filterStatus = prev; }
+}
+function blWantedXml(list){
+  const items = list.map(s =>
+    '  <ITEM><ITEMTYPE>S</ITEMTYPE><ITEMID>' + String(s.n).trim() + '-1</ITEMID><CONDITION>N</CONDITION></ITEM>'
+  ).join('\n');
+  return '<INVENTORY>\n' + items + '\n</INVENTORY>\n';
+}
+document.getElementById('blWantedBtn').onclick = async (e) => {
+  const btn = e.currentTarget, label = btn.textContent;
+  const list = blWantedSets();
+  const flash = (t) => { btn.textContent = t; setTimeout(() => btn.textContent = label, 2800); };
+  if (!list.length){ flash('No missing sets'); return; }
+  // Open the tab synchronously (inside the click) so popup blockers allow it.
+  window.open('https://www.bricklink.com/v2/wanted/upload.page', '_blank', 'noopener');
+  const xml = blWantedXml(list);
+  try {
+    await navigator.clipboard.writeText(xml);
+    flash('Copied ' + list.length + ' sets');
+  } catch {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([xml], {type:'application/xml'}));
+    a.download = 'brick-garage-bricklink-wanted-' + new Date().toISOString().slice(0,10) + '.xml';
+    a.click(); URL.revokeObjectURL(a.href);
+    flash('Downloaded ' + list.length + ' sets');
+  }
 };
 
 // export / import
@@ -1433,7 +1548,7 @@ async function syncPull(){
     }
     if (rts > syncLocalTs()){
       applyingRemote = true;
-      applyCollection(data); applyAutoProd(); setSyncLocalTs(rts);
+      applyCollection(data); applyAutoProd(); applyAutoTheme(); setSyncLocalTs(rts);
       await persist(); render(); renderTelemetry();
       applyingRemote = false;
     }
