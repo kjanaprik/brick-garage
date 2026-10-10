@@ -44,6 +44,10 @@ jobs:
           # and the adapter goes back to calling BrickLink directly.
           BL_PROXY_URL: ${{ secrets.BL_PROXY_URL }}
           BL_PROXY_KEY: ${{ secrets.BL_PROXY_KEY }}
+          # Boozt/Booztlet 429 GitHub's IPs, so their requests go through the brick-garage-boozt
+          # Worker (workers/boozt-proxy-worker.js). Unset these two = direct requests as before.
+          BOOZT_PROXY_URL: ${{ secrets.BOOZT_PROXY_URL }}
+          BOOZT_PROXY_KEY: ${{ secrets.BOOZT_PROXY_KEY }}
           PRICES_BL_PER_RUN: '150'                        # proxy works, so attempt all sets
           PRICES_BL_BUDGET_MIN: '12'
           # PRICES_SKIP_BRICKLINK: '1'                    # uncomment to skip the marketplace pass

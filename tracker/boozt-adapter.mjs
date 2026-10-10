@@ -46,6 +46,14 @@ const FALLBACK_GIVE_UP_AFTER = 2;
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+// Boozt answers HTTP 429 to GitHub Actions' IPs from the first request of a run. When
+// BOOZT_PROXY_URL is set, every request goes through a Cloudflare Worker instead
+// (workers/boozt-proxy-worker.js), whose egress Boozt treats like normal traffic.
+// Unset = direct requests, exactly as before.
+const PROXY = (process.env.BOOZT_PROXY_URL || '').replace(/\/+$/, '');
+const PROXY_KEY = process.env.BOOZT_PROXY_KEY || '';
+export const viaProxy = () => !!PROXY;
+
 class FetchFailure extends Error {}
 class RateLimited extends FetchFailure {}
 
@@ -53,19 +61,28 @@ async function getProducts(url) {
   let last;
   for (let i = 0; i < MAX_TRIES; i++) {
     try {
-      const res = await fetch(url, {
-        headers: {
-          'User-Agent': UA,
-          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-          'Accept-Language': 'is-IS,is;q=0.9,en;q=0.8',
-        },
-      });
+      const res = PROXY
+        ? await fetch(`${PROXY}/fetch?u=${encodeURIComponent(url)}`, { headers: { 'X-BG-Key': PROXY_KEY } })
+        : await fetch(url, {
+          headers: {
+            'User-Agent': UA,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+            'Accept-Language': 'is-IS,is;q=0.9,en;q=0.8',
+          },
+        });
       if (res.status === 429) throw new RateLimited('HTTP 429');
+      // A 403/400 from the Worker itself is a setup problem (wrong key or URL), not Boozt.
+      if (PROXY && (res.status === 403 || res.status === 400) && !res.headers.get('x-final-url')) {
+        throw new FetchFailure(`proxy refused the request (HTTP ${res.status}) — check BOOZT_PROXY_KEY / BOOZT_PROXY_URL`);
+      }
       if (!res.ok) throw new FetchFailure(`HTTP ${res.status}`);
       const html = await res.text();
       // Zero hits: the shop 302s to /search/no-result and serves a 200 page with no products
       // array. That is a genuine "not stocked", so return [] (a miss), don't retry as a block.
-      if (/\/search\/no-result/.test(res.url || '') || html.includes('SearchNoResultsPage')) return [];
+      // Through the proxy the redirect happens inside the Worker, which reports where it
+      // ended up in X-Final-URL.
+      const finalUrl = res.headers.get('x-final-url') || res.url || '';
+      if (/\/search\/no-result/.test(finalUrl) || html.includes('SearchNoResultsPage')) return [];
       const products = extractProducts(html);
       // HTTP 200 with no products array = soft block / challenge page. Retry it
       // rather than recording a false "not stocked".
@@ -269,7 +286,7 @@ function makeScraper(retailer, host) {
     }
 
     console.log(
-      `[${retailer}] ${stats.hit} hit (${stats.byName} via name) / ${stats.miss} miss / ` +
+      `[${retailer}]${PROXY ? ' (via Cloudflare proxy)' : ''} ${stats.hit} hit (${stats.byName} via name) / ${stats.miss} miss / ` +
         (wantedMattel.length ? `${stats.mattel}/${wantedMattel.length} Mattel / ` : '') +
         `${stats.error} error of ${stats.requested}` +
         (stats.skipped ? `, ${stats.skipped} fallback skipped` : '') +
