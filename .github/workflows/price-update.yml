@@ -1,6 +1,6 @@
 name: Brick Garage price update
 
-# Daily: scrape 7 retailers + BrickLink -> commit prices.json (the page reads it) AND
+# Daily: scrape 9 retailers + BrickLink -> commit prices.json (the page reads it) AND
 # diff against the previous prices.json to detect drops/sales/restocks/all-time-lows on
 # your watched (missing) sets -> open a GitHub issue when something changes. Fully on
 # GitHub. Sets marked Owned in the synced collection are skipped entirely.

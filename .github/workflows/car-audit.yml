@@ -1,6 +1,7 @@
 name: Brick Garage car audit
 
-# Weekly (and on-demand) check for new LEGO car sets. AUTO-COMMIT mode: new sets
+# Weekly (and on-demand) check for new LEGO car sets and new Mattel Brick Shop sets
+# (audit-mattel.mjs). AUTO-COMMIT mode: new sets
 # that pass the car filters and aren't in ignore-skus.json are appended to
 # index.html's CATALOG and committed, so the Pages site self-updates.
 # ignore-skus.json is the veto list — put anything you DON'T want in there.
@@ -29,9 +30,19 @@ jobs:
           AUDIT_APPLY: '1'        # write new sets into index.html
         run: node audit-cars.mjs
 
-      - name: Add report to job summary
+      - name: Run Mattel Brick Shop audit (apply)
+        id: mattel
         if: always()
-        run: cat audit-report.md >> "$GITHUB_STEP_SUMMARY"
+        env:
+          AUDIT_APPLY: '1'
+        run: node audit-mattel.mjs
+
+      - name: Add reports to job summary
+        if: always()
+        run: |
+          cat audit-report.md >> "$GITHUB_STEP_SUMMARY" || true
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          cat audit-mattel-report.md >> "$GITHUB_STEP_SUMMARY" || true
 
       - name: Commit new sets
         if: always()
@@ -43,7 +54,8 @@ jobs:
             git config user.name  "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git add index.html
-            git commit -m "Auto-add ${{ steps.audit.outputs.new_count }} new car set(s) from audit"
+            LEGO="${{ steps.audit.outputs.new_count }}"; MATTEL="${{ steps.mattel.outputs.mattel_new_count }}"
+            git commit -m "Auto-add ${LEGO:-0} LEGO + ${MATTEL:-0} Mattel set(s) from audit"
             git push
-            echo "Committed ${{ steps.audit.outputs.new_count }} new set(s)."
+            echo "Committed ${LEGO:-0} LEGO + ${MATTEL:-0} Mattel set(s)."
           fi

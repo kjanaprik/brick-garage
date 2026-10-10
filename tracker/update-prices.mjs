@@ -1,5 +1,5 @@
 // update-prices.mjs
-// Scrapes the 7 retailers for every catalog set, writes prices.json (what the page
+// Scrapes the retailers for every catalog set, writes prices.json (what the page
 // reads), and — by diffing against the PREVIOUS committed prices.json — detects price
 // drops / new sales / restocks / all-time lows on your watched (missing) sets and
 // writes price-alerts.md for the workflow to raise a GitHub issue. Runs on Actions.
@@ -8,7 +8,14 @@
 //   ../index.html        catalog source (CATALOG array)
 //   ../prices.json       output + previous-run history (committed)
 //   ../ignore-skus.json  sets to skip entirely
-//   ../watch-skus.json   OPTIONAL: only alert on these sets (missing list). Absent = all.
+//   ../watch-skus.json   OPTIONAL: only alert on these LEGO sets (missing list). Absent = all.
+//                        Mattel Brick Shop sets are always watched (owned ones are skipped).
+//
+// Two kinds of set number are tracked:
+//   LEGO               numeric set numbers (42172)
+//   Mattel Brick Shop  toy numbers, 3 letters + 2 digits (JKG40). Only adapters marked
+//                      `mattel: true` receive these; Brickset and BrickLink never do —
+//                      neither catalogue lists Mattel sets.
 //   ../price-alerts.md   output: the alert report (only when there are changes)
 //
 // Env (optional — set as GitHub secrets to price manually-added "+ ADD SET" sets):
@@ -21,6 +28,7 @@
 import { readFile, writeFile } from 'node:fs/promises';
 import { scrapeKubbabudin } from './kubbabudin-adapter.mjs';
 import { scrapeBrickshop } from './brickshop-adapter.mjs';
+import { scrapeBrickmo } from './brickmo-adapter.mjs';
 import { scrapeCoolshop } from './coolshop-adapter.mjs';
 import { scrapeBoozt, scrapeBooztlet } from './boozt-adapter.mjs';
 import { scrapeKidsworld } from './kidsworld-adapter.mjs';
@@ -28,6 +36,7 @@ import { scrapeElko } from './elko-adapter.mjs';
 import { scrapeTrekk } from './trekk-adapter.mjs';
 import { scrapeBricklink } from './bricklink-adapter.mjs';
 import { guardRows } from './carry-forward.mjs';
+import { getRates } from './fx.mjs';
 
 const rel = (p) => new URL(p, import.meta.url);
 const CATALOG_PATH = rel(process.env.PRICES_CATALOG || '../index.html');
@@ -59,12 +68,27 @@ const MIN_DROP_ISK = Number(process.env.PRICES_MIN_DROP_ISK || 1000);
 // failed scrape, not as the retailer having dropped the stock.
 const CARRY_FLOOR = Number(process.env.PRICES_CARRY_FLOOR || 0.75);
 
+// [label, scraper, options]. `mattel: true` = the adapter can resolve Mattel Brick
+// Shop toy numbers; the rest only ever see LEGO set numbers, so they can't produce a
+// false positive from a search for "JKG40".
 const ADAPTERS = [
   ['Kubbabúðin', scrapeKubbabudin], ['Coolshop', scrapeCoolshop],
   ['Boozt', scrapeBoozt], ['Booztlet', scrapeBooztlet],
   ['Kids-world', scrapeKidsworld], ['ELKO', scrapeElko], ['Trekk', scrapeTrekk],
-  ['Brickshop', scrapeBrickshop],
+  ['Brickshop', scrapeBrickshop, { mattel: true }],
+  ['Brickmo', scrapeBrickmo, { mattel: true }],
 ];
+
+// Mattel Brick Shop toy numbers: 3 letters + 2 digits (JKG40, HWW25).
+const MATTEL_RE = /^[A-Z]{3}\d{2}$/;
+const isMattel = (n) => MATTEL_RE.test(String(n));
+// EU shops are priced as the ITEM ONLY: listed EUR minus EU VAT (what an Iceland
+// checkout charges for the item), converted at Íslandsbanki's card selling rate (what the card is actually charged). No shipping,
+// no fees, no Icelandic import VAT. The ex-VAT EUR figure is carried to the page too.
+const EU_SHOPS = new Set(['Brickshop', 'Brickmo']);
+// Marks which pricing basis prices.json was written with. When it changes, the first
+// run's EU price moves are a change of method, not a price change, so they don't alert.
+const EU_BASIS = 'item-ex-vat-card';
 
 async function readJson(url, fallback) { try { return JSON.parse(await readFile(url, 'utf8')); } catch { return fallback; } }
 const fmt = (n) => (n == null ? '—' : Number(n).toLocaleString('de-DE'));
@@ -103,8 +127,9 @@ async function kvCollection() {
 
     const seen = new Set(), out = [], owned = new Set();
     for (const e of entries) {
-      const n = String(e?.n ?? e?.num ?? e?.sku ?? e?.set ?? e?.id ?? '').trim();
-      if (!/^\d{3,7}$/.test(n) || seen.has(n)) continue;   // real LEGO set numbers, deduped
+      let n = String(e?.n ?? e?.num ?? e?.sku ?? e?.set ?? e?.id ?? '').trim();
+      if (/^[a-z]{3}\d{2}$/i.test(n)) n = n.toUpperCase();            // Mattel toy number
+      if (!(/^\d{3,7}$/.test(n) || isMattel(n)) || seen.has(n)) continue;   // real set numbers, deduped
       seen.add(n);
       if (e?.status === 'owned') owned.add(n);
       out.push({ n, name: e?.name ?? e?.title ?? null });
@@ -173,21 +198,31 @@ async function main() {
   // the card's price block survive rather than being wiped.
   const skus = [...new Set([...cat.map((e) => String(e.n)), ...added.map((s) => s.n)])]
     .filter((s) => !ignore.has(s) && !owned.has(s));
+  const legoSkus = skus.filter((s) => !isMattel(s));
+  const mattelCount = skus.length - legoSkus.length;
   if (owned.size) console.error(`[prices] skipping ${owned.size} owned set(s)`);
-  console.error(`[prices] tracking ${skus.length} sets; watching ${watch ? watch.size : 'all'}`);
+  console.error(`[prices] tracking ${skus.length} sets (${legoSkus.length} LEGO, ${mattelCount} Mattel); ` +
+    `watching ${watch ? `${watch.size} LEGO + all Mattel` : 'all'}`);
 
   // Production status from Brickset (merged over the last run so a transient API
   // failure never wipes it). Empty when BRICKSET_API_KEY is unset — page keeps its seed.
-  const prodMap = { ...(prevAll.prod || {}), ...(await bricksetProd(skus)) };
+  // LEGO only: Brickset doesn't list Mattel sets.
+  const prodMap = { ...(prevAll.prod || {}), ...(await bricksetProd(legoSkus)) };
+
+  // One EUR->ISK rate for the whole run (Íslandsbanki card rate, or a labelled estimate).
+  const rates = await getRates();
+  const basisChanged = prevAll.eu_basis !== EU_BASIS;
+  if (basisChanged) console.error(`[prices] EU pricing basis changed -> ${EU_BASIS}; EU price moves won't alert this run`);
 
   const t0 = Date.now();
   let carriedTotal = 0;
-  const results = await Promise.all(ADAPTERS.map(async ([label, fn]) => {
+  const results = await Promise.all(ADAPTERS.map(async ([label, fn, opts = {}]) => {
     let rows = [], failed = false;
+    const input = opts.mattel ? skus : legoSkus;
     try {
       // nameOf is passed as a second arg for adapters that can fall back to a
       // name search (Boozt/Booztlet). Others ignore both extra args.
-      rows = await fn(skus, nameOf, {
+      rows = await fn(input, nameOf, {
         misses: (missCounts[label] ??= {}),
         // Booztlet shares Boozt's backend — start it late so they don't collide.
         startDelayMs: label === 'Booztlet' ? 45000 : 0,
@@ -198,8 +233,16 @@ async function main() {
       failed = true;
     }
     // A blocked or throttled scrape must not read as "retailer dropped the set".
-    const g = guardRows({ label, rows, prevSets: prev, since: prevUpdated, floor: CARRY_FLOOR, failed, skus });
+    const g = guardRows({ label, rows, prevSets: prev, since: prevUpdated, floor: CARRY_FLOOR, failed, skus: input });
     carriedTotal += g.carried;
+    // Carried-forward EU rows may come from an older run (different rate, or the old
+    // landed-with-shipping basis). Re-derive their ISK from the ex-VAT EUR at today's rate;
+    // drop the ones that can't be re-derived rather than show a figure on another basis.
+    if (EU_SHOPS.has(label)) {
+      g.rows = g.rows.filter((r) => !r.stale || r.eur_ex_vat != null).map((r) => (r.stale
+        ? { ...r, price_isk: Math.round(r.eur_ex_vat * rates.card), rrp_isk: null, on_sale: false }
+        : r));
+    }
     return [label, g.rows];
   }));
 
@@ -209,7 +252,7 @@ async function main() {
   let bricklink = {}, fxUsd = null;
   if (!SKIP_BL) {
     try {
-      const bl = await scrapeBricklink(skus, {
+      const bl = await scrapeBricklink(legoSkus, {   // BrickLink has no Mattel catalogue
         cachePath: BL_IDS_PATH,
         lotsPath: BL_LOTS_PATH,
         keepLots: Number(process.env.PRICES_BL_KEEP_LOTS || 40),
@@ -233,7 +276,7 @@ async function main() {
       const gained = Object.keys(bl).filter((k) => !prevBl[k]).length;
       console.error(
         `  BrickLink: ${Object.keys(bl).length} fresh (+${gained} new), ` +
-          `${Object.keys(bricklink).length} of ${skus.length} covered`
+          `${Object.keys(bricklink).length} of ${legoSkus.length} covered`
       );
     } catch (e) {
       console.error(`  BrickLink FAILED: ${e.message}`);
@@ -247,21 +290,23 @@ async function main() {
     fxUsd = prevAll.fx_usd ?? null;
   }
 
-  const sets = {}; let fx = null;
+  const sets = {};
+  const fx = rates.mid;                       // mid-market, used for BrickLink EUR figures
   for (const [label, rows] of results) for (const r of rows) {
-    if (label === 'Brickshop' && r.fx_rate) fx = r.fx_rate;
     const e = (sets[r.sku] ??= { shops: {} });
     e.shops[label] = {
       p: r.price_isk, sale: !!r.on_sale, was: r.rrp_isk ?? null,
       stock: r.in_stock !== false, url: r.url || null,
-      ...(label === 'Brickshop' && r.bundled_isk != null ? { bundled: r.bundled_isk } : {}),
-      ...(label === 'Brickshop' && r.eur_ex_vat != null ? { eur: r.eur_ex_vat } : {}),
+      ...(EU_SHOPS.has(label) && r.eur_ex_vat != null ? { eur: r.eur_ex_vat } : {}),
+      ...(r.preorder ? { pre: true } : {}),
+      ...(r.release ? { rel: r.release } : {}),
       ...(r.stale ? { stale: true, since: r.stale_since || null } : {}),
     };
     if (r.pieces && !e.pieces) e.pieces = r.pieces;   // real piece count (from Brickshop spec table)
+    if (r.img && !e.img) e.img = r.img;               // retailer photo for sets with no catalog image
   }
-  // If Brickshop was carried forward there's no live rate in this run — keep the last one.
-  if (fx == null && prevAll.fx != null) fx = prevAll.fx;
+  // A photo is a stable fact about the set; keep it when today's run didn't supply one.
+  for (const [n, e] of Object.entries(sets)) if (!e.img && prev[n]?.img) e.img = prev[n].img;
 
   // Preserve what we last knew about owned sets — frozen, never alerted on.
   for (const n of owned) {
@@ -289,9 +334,10 @@ async function main() {
 
     // ---- alert logic (only for watched sets, and only on a real change) ----
     if (e.frozen) continue;            // owned: not re-scraped, nothing to alert
-    if (watch && !watch.has(n)) continue;
+    if (watch && !watch.has(n) && !isMattel(n)) continue;   // Mattel sets are always watched
     if (e.cheapest == null) continue;
     if (best?.stale) continue;   // don't raise an alert off a value we didn't actually re-scrape
+    if (basisChanged && (EU_SHOPS.has(e.shop) || EU_SHOPS.has(pv.shop))) continue;   // method change, not a price change
     const prevCheap = pv.cheapest ?? null;
     const isNewLow = pv.low != null && e.cheapest < pv.low;               // beat the old record
     const isRestock = prevCheap == null;                                  // had nothing before
@@ -310,6 +356,7 @@ async function main() {
 
   const out = {
     updated: new Date().toISOString(), fx, fx_usd: fxUsd,
+    fx_card: rates.card, fx_card_src: rates.src, fx_card_date: rates.date, eu_basis: EU_BASIS,
     count: Object.keys(sets).length, prod: prodMap, sets,
     bricklink,
   };
@@ -328,14 +375,14 @@ async function main() {
   alerts.sort((a, b) => order[a.kind] - order[b.kind] || (b.pct - a.pct));
   let md;
   if (alerts.length) {
-    md = `# 💸 Brick Garage price watch — ${today}\n\n**${alerts.length}** change(s) on your watched sets${fx ? ` _(FX ${fx.toFixed(2)} kr/€)_` : ''}:\n\n`;
+    md = `# 💸 Brick Garage price watch — ${today}\n\n**${alerts.length}** change(s) on your watched sets${` _(EU shops: item price ex VAT at ${rates.card.toFixed(2)} kr/€, ${rates.src === 'islandsbanki' ? 'Íslandsbanki card rate' : 'estimated card rate'})_`}:\n\n`;
     md += `| | Set | Name | Now | Was | Shop |\n|---|---|---|---|---|---|\n`;
     for (const a of alerts) {
       const was = a.prev != null ? `${fmt(a.prev)} kr${a.pct > 0 ? ` (−${a.pct}%)` : ''}` : '—';
       const link = a.url ? `[${a.shop}](${a.url})` : a.shop;
       md += `| ${ICON[a.kind]} | ${a.n} | ${a.name} | **${fmt(a.now)} kr** | ${was} | ${link} |\n`;
     }
-    md += `\n_Watching ${watch ? watch.size : 'all'} sets across 7 retailers. Only changes since the last run are shown._\n`;
+    md += `\n_Watching ${watch ? `${watch.size} LEGO + ${mattelCount} Mattel` : 'all'} sets across ${ADAPTERS.length} retailers. Only changes since the last run are shown._\n`;
   } else {
     md = `# 💸 Brick Garage price watch — ${today}\n\nNo price drops or new sales on your watched sets today.\n`;
   }

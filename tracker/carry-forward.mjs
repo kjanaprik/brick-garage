@@ -7,7 +7,8 @@
 // worse price.
 //
 // Rows are reconstructed in the exact shape update-prices.mjs's merge loop expects
-// (price_isk / rrp_isk / on_sale / in_stock / url / bundled_isk / pieces).
+// (price_isk / rrp_isk / on_sale / in_stock / url / eur_ex_vat /
+// preorder / release / pieces).
 
 /**
  * Rebuild adapter-shaped rows for one shop out of the previous run's `sets` map.
@@ -27,8 +28,9 @@ export function prevRowsFor(prevSets, label, since = null) {
       on_sale: !!shop.sale,
       in_stock: !!shop.stock,
       url: shop.url ?? null,
-      ...(shop.bundled != null ? { bundled_isk: shop.bundled } : {}),
       ...(shop.eur != null ? { eur_ex_vat: shop.eur } : {}),
+      ...(shop.pre ? { preorder: true } : {}),
+      ...(shop.rel ? { release: shop.rel } : {}),
       ...(entry.pieces != null ? { pieces: entry.pieces } : {}),
       stale: true,
       stale_since: since,

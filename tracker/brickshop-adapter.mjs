@@ -16,40 +16,27 @@
 //   { retailer, sku, name, price_isk, rrp_isk, on_sale, in_stock, url, scraped_at,
 //     price_eur, currency }   // last two are extra context; DB upsert ignores them
 //
-// Prices are converted to a LANDED-to-Iceland ISK estimate so they're comparable
-// to the ISK retailers (Kubbabúðin). The scraped itemprop price includes Dutch (EU)
-// VAT; Iceland is outside the EU, so that's stripped, then weight-based shipping and
-// Icelandic import VAT apply:
-//     ex_eu_vat  = eur / EU_VAT                          (EU_VAT = 1.21, Dutch VAT)
-//     ship_eur   = max(28.05, 18.79 + 4.88 * weight_kg)  (fitted to real IS checkout)
-//     goods      = ex_eu_vat + ship_eur
-//     landed_isk = round( goods * EUR_ISK_CARD  +  goods * (VAT-1) * EUR_ISK )
-//                  (card rate on what you pay; official rate on the 24% import VAT)
-// weight_kg is scraped from the product page ("Weight … g"); falls back to 1.5 kg.
-// This is "buy-alone" shipping (one set ~= the €28 minimum); bundling lowers per-set.
-// Sale detection is intentionally NOT attempted from the page (no reliable
-// was-price marker); the pipeline's own PriceHistory drop-detection covers that.
+// Pricing — item price only (no shipping, no import VAT), so it compares directly
+// with Brickmo:
+//     eur_ex_vat = listed / EU_VAT       (EU_VAT = 1.21, Dutch VAT; Iceland is outside
+//                                          the EU so it is not charged)
+//     price_isk  = round(eur_ex_vat * Íslandsbanki card selling rate)   (see fx.mjs)
+// The shipping weight is still read from the page and returned as weight_kg, for
+// reference only.
+// Sale detection reads the product-Old-Price span paired with the main product's
+// data-eur (see parseProduct), so cross-sell items can't trigger it.
+//
+// Mattel Brick Shop: Brickshop lists these under /mattel-brick-shop/ with URLs that
+// do NOT contain the toy number, but every product page carries it as
+// <meta itemprop="sku" content="JKR19">. Toy numbers (3 letters + 2 digits) are
+// resolved by crawling that category and reading the sku off each product page.
 
 const BASE       = (process.env.BRICKSHOP_BASE || 'https://www.brickshop.eu').replace(/\/+$/, '');
-// EUR->ISK: pin with BRICKSHOP_EUR_ISK, else fetched live at scrape() start (fallback 145).
-// This is the MID-MARKET rate. Nothing is ever bought at mid: the euros charged by
-// Brickshop settle on a card at the scheme's sell rate plus the issuer's FX fee — on
-// 12.09.2026 Visa's EUR sölugengi was 143.1939 against a mid of 140.42, a spread of
-// 1.97%. The spread is contractual and stable while the underlying rate moves daily,
-// so a multiplier tracks the real cost well. Set PRICES_FX_SPREAD=0 for mid.
-const EUR_ISK_ENV = process.env.BRICKSHOP_EUR_ISK ? Number(process.env.BRICKSHOP_EUR_ISK) : null;
-let EUR_ISK       = EUR_ISK_ENV ?? 145;
-const FX_SPREAD   = Number(process.env.PRICES_FX_SPREAD ?? 0.02);
-// Rate applied to the part actually paid by card (goods + shipping).
-const cardRate = () => EUR_ISK * (1 + FX_SPREAD);
-const VAT        = Number(process.env.BRICKSHOP_VAT || 1.24);      // Icelandic import VAT
 const EU_VAT     = Number(process.env.BRICKSHOP_EU_VAT || 1.21);   // Dutch VAT baked into the listed price
-// Weight-based shipping to Iceland (buy-alone), fitted to real checkout data:
-//   ship(EUR) = max(FLOOR, BASE + PER_KG * weight_kg)
-const SHIP_FLOOR  = Number(process.env.BRICKSHOP_SHIP_FLOOR || 28.05);
-const SHIP_BASE   = Number(process.env.BRICKSHOP_SHIP_BASE || 18.79);
-const SHIP_PER_KG = Number(process.env.BRICKSHOP_SHIP_PER_KG || 4.88);
-const SHIP_FALLBACK_KG = Number(process.env.BRICKSHOP_SHIP_FALLBACK_KG || 1.5); // if weight not on page
+let FX = { mid: 145, card: 145, src: 'estimate' };                    // set at scrape() start (fx.mjs)
+const toIsk  = (eur) => (eur == null ? null : Math.round(eur * FX.card));
+const round2 = (n) => Math.round(n * 100) / 100;
+const exVat  = (eur) => (eur == null ? null : round2(eur / EU_VAT));
 const PAGE_SIZE  = Number(process.env.BRICKSHOP_PAGE_SIZE || 40);
 const MAX_PAGES  = Number(process.env.BRICKSHOP_MAX_PAGES || 12);
 const REQ_DELAY  = Number(process.env.BRICKSHOP_REQ_DELAY_MS || 250);
@@ -60,10 +47,17 @@ const CATEGORIES = (process.env.BRICKSHOP_CATEGORIES ||
   'lego-technichtml.html,lego-speed-championshtml.html,lego-iconshtml.html'
 ).split(',').map(s => s.trim()).filter(Boolean);
 
+import { getRates } from './fx.mjs';
+
 const RETAILER = 'brickshop';
 const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)';
 
 const PRODUCT_RE = /(\/lego\/[a-z0-9/-]+\/lego-(\d{3,6})[a-z0-9/-]*\.html)/gi;
+
+// Mattel Brick Shop toy numbers, e.g. JKG40 / HWW25.
+const MATTEL_RE = /^[A-Z]{3}\d{2}$/;
+const MATTEL_CATEGORY = process.env.BRICKSHOP_MATTEL_CATEGORY || 'mattel-brick-shop.html';
+const MATTEL_PRODUCT_RE = /href=["'](\/mattel-brick-shop\/[^"'#?\s]+\.html)["']/gi;
 
 // --- helpers ---------------------------------------------------------------
 
@@ -133,28 +127,6 @@ function parseWeightKg(html) {
   return unit[0] === 'k' ? num : num / 1000;   // grams -> kg
 }
 
-function shippingEur(kg) {
-  const w = (kg == null || !Number.isFinite(kg)) ? SHIP_FALLBACK_KG : kg;
-  return Math.max(SHIP_FLOOR, SHIP_BASE + SHIP_PER_KG * w);
-}
-
-// The two halves of a landed price convert at DIFFERENT rates, so they're computed
-// separately: goods + shipping are charged to the card and settle at the card rate,
-// while Icelandic import VAT is assessed by customs on the declared value using the
-// official published rate, not your card's. Multiplying the whole figure by the card
-// rate would overstate the VAT portion by roughly 0.4% of the total.
-function convertLanded(goodsEur) {
-  return Math.round(goodsEur * cardRate() + goodsEur * (VAT - 1) * EUR_ISK);
-}
-
-function landedIsk(eur, kg) {
-  if (eur == null) return null;
-  // Strip Dutch (EU) VAT (Iceland is outside the EU), add weight-based shipping,
-  // then apply Icelandic import VAT and convert to ISK.
-  const exEuVat = eur / EU_VAT;
-  return convertLanded(exEuVat + shippingEur(kg));
-}
-
 /**
  * Build a { sku -> productPath } map by crawling the configured category
  * listings with pagination. Deduped; stops a category when a page yields no
@@ -199,6 +171,7 @@ function parseProduct(html, sku, path) {
   let name = decodeEntities((html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i) || [])[1] || '')
     .replace(/<[^>]+>/g, '').trim() || null;
   const weight_kg = parseWeightKg(html);
+  const img = (html.match(/property=["']og:image["'][^>]*content=["']([^"']+)["']/i) || [])[1] || null;
 
   // Sale detection: each product's price selector carries data-eur = its current
   // price. The main product's pre-discount price is the `product-Old-Price` whose
@@ -221,57 +194,27 @@ function parseProduct(html, sku, path) {
     return m ? Number(m[1]) : null;
   })();
 
-  // Bundled landed price: marginal shipping only (per-kg, shared floor/base dropped),
-  // i.e. the cost when this set rides along in a larger order.
-  const bundled_isk = price_eur == null ? null
-    : convertLanded(price_eur / EU_VAT + SHIP_PER_KG * (weight_kg ?? SHIP_FALLBACK_KG));
-
   return {
     retailer: RETAILER,
     sku,
     name,
-    price_isk: landedIsk(price_eur, weight_kg),
-    rrp_isk: on_sale ? landedIsk(base_eur, weight_kg) : null,
+    price_isk: toIsk(exVat(price_eur)),            // ex-VAT item price at Íslandsbanki card rate
+    rrp_isk: on_sale ? toIsk(exVat(base_eur)) : null,
     on_sale,
     in_stock,
     url: BASE + path,
     scraped_at: new Date().toISOString(),
     price_eur,                      // extra context (ignored by DB upsert)
     currency,
-    weight_kg,                      // scraped shipping weight
-    shipping_eur: Math.round(shippingEur(weight_kg) * 100) / 100,
-    fx_rate: EUR_ISK,               // mid-market EUR->ISK this landed price was built from
-    fx_card: Math.round(cardRate() * 10000) / 10000,   // card rate applied to goods+shipping
+    weight_kg,                      // scraped shipping weight (reference only)
+    fx_rate: FX.mid,                // mid-market, for reference
+    fx_card: FX.card, fx_src: FX.src,   // card rate price_isk was converted at
     base_eur,                       // pre-discount EUR (incl. NL VAT), null if not on sale
     discount_pct,                   // % off vs base, 0 if not on sale
-    bundled_isk,                    // landed price when bundled in a larger order
-    eur_ex_vat: price_eur == null ? null : Math.round(price_eur / EU_VAT * 100) / 100,   // listed EUR price minus Dutch VAT (goods only)
+    eur_ex_vat: exVat(price_eur),   // listed EUR price minus Dutch VAT (item only)
     pieces,                         // piece count from the spec table (or null)
+    img,                            // og:image, used when the page has no picture of its own
   };
-}
-
-/**
- * Fetch a live EUR->ISK rate. ECB dropped ISK in 2008, so ECB-based feeds are
- * unreliable; open.er-api.com is primary, Frankfurter a secondary. Returns a
- * positive number or null (caller keeps the previous/fallback rate).
- */
-async function fetchEurIsk() {
-  const sources = [
-    ['https://open.er-api.com/v6/latest/EUR', (d) => d && d.rates && d.rates.ISK],
-    ['https://api.frankfurter.app/latest?from=EUR&to=ISK', (d) => d && d.rates && d.rates.ISK],
-  ];
-  for (const [url, pick] of sources) {
-    try {
-      const ctl = new AbortController();
-      const to = setTimeout(() => ctl.abort(), 8000);
-      const r = await fetch(url, { signal: ctl.signal });
-      clearTimeout(to);
-      if (!r.ok) continue;
-      const v = Number(pick(await r.json()));
-      if (Number.isFinite(v) && v > 0) return v;
-    } catch { /* try next source */ }
-  }
-  return null;
 }
 
 /**
@@ -290,22 +233,54 @@ async function searchResolve(sku) {
 }
 
 /**
- * scrape(skus) — fetch landed price/stock for the given LEGO set numbers.
+ * Mattel Brick Shop: crawl the category for product paths, fetch each page and keep
+ * those whose itemprop="sku" is one of the wanted toy numbers. The category is small
+ * (~15 sets), so reading every page is cheaper than guessing slugs.
+ */
+async function scrapeMattel(wantedMattel) {
+  const want = new Set(wantedMattel);
+  const paths = new Set();
+  for (let page = 0; page < MAX_PAGES; page++) {
+    const url = `${BASE}/${MATTEL_CATEGORY}?limit=${PAGE_SIZE}&limitstart=${page * PAGE_SIZE}`;
+    let html;
+    try { html = await getText(url); }
+    catch (e) { console.warn(`[${RETAILER}] mattel category fetch failed ${url}: ${e.message}`); break; }
+    let fresh = 0;
+    for (const m of html.matchAll(MATTEL_PRODUCT_RE)) {
+      if (!paths.has(m[1])) { paths.add(m[1]); fresh++; }
+    }
+    if (!fresh) break;
+    if (REQ_DELAY) await sleep(REQ_DELAY);
+  }
+  const out = [];
+  for (const path of paths) {
+    try {
+      const html = await getText(BASE + encodeURI(decodeURI(path)));
+      const sku = ((html.match(/itemprop=["']sku["'][^>]*content=["']([^"']+)["']/i) || [])[1] || '').trim().toUpperCase();
+      if (!want.has(sku)) continue;
+      const rec = parseProduct(html, sku, path);
+      if (rec.price_eur != null) out.push(rec);
+    } catch (e) {
+      console.warn(`[${RETAILER}] mattel failed ${path}: ${e.message}`);
+    }
+    if (REQ_DELAY) await sleep(REQ_DELAY);
+  }
+  console.error(`[${RETAILER}] mattel: ${paths.size} product pages, ${out.length} matched`);
+  return out;
+}
+
+/**
+ * scrape(skus) — fetch ex-VAT item price/stock for the given LEGO set numbers and
+ * Mattel Brick Shop toy numbers.
  * @param {string[]} skus e.g. ['42172','10357']
  * @returns {Promise<Array>} normalised records (only SKUs Brickshop actually carries)
  */
 export async function scrape(skus = []) {
-  const wanted = [...new Set(skus.map(s => String(s).trim()))];
+  const all = [...new Set(skus.map(s => String(s).trim()))];
+  const wantedMattel = all.filter(s => MATTEL_RE.test(s));
+  const wanted = all.filter(s => !MATTEL_RE.test(s));
 
-  // Live EUR->ISK once per run (unless pinned via env).
-  if (EUR_ISK_ENV == null) {
-    const live = await fetchEurIsk();
-    if (live) EUR_ISK = live;
-    console.error(
-      `[${RETAILER}] EUR->ISK = ${EUR_ISK}${live ? ' (live)' : ' (fallback)'}` +
-        (FX_SPREAD ? `, card ${cardRate().toFixed(4)} (+${(FX_SPREAD * 100).toFixed(2)}%)` : '')
-    );
-  }
+  FX = await getRates();
 
   let map;
   try { map = await buildSkuMap(); }
@@ -333,13 +308,14 @@ export async function scrape(skus = []) {
     }
   }
   await Promise.all(Array.from({ length: Math.min(CONCURRENCY, wanted.length || 1) }, worker));
+  if (wantedMattel.length) out.push(...await scrapeMattel(wantedMattel));
   return out;
 }
 
 export const scrapeBrickshop = scrape;
 export default scrape;
 
-// CLI: `node brickshop-adapter.mjs 77261 42172 10357`
+// CLI: `node brickshop-adapter.mjs 77261 42172 10357 JKR19`
 if (import.meta.url === `file://${process.argv[1]}`) {
   const skus = process.argv.slice(2);
   if (!skus.length) { console.error('usage: node brickshop-adapter.mjs <sku> [sku...]'); process.exit(1); }
