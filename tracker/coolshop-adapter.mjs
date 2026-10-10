@@ -19,10 +19,20 @@
 //
 // Sale detection is left to the pipeline's PriceHistory drop-logic (Coolshop's
 // JSON-LD carries no reliable was-price), consistent with the other adapters.
+//
+// Mattel Brick Shop (toy numbers like JGR31): Coolshop lists these as "Hot Wheels -
+// Brick Shop …" with the toy number lowercased at the end of the slug
+// (/vara/…-jgr31/23RX5F/) and in the product name "(JGR31)"; usually also as the
+// JSON-LD mpn, though some listings carry an internal code there instead. A couple of keyword searches map
+// most of the range in one go; anything not found that way gets a per-number search.
+// Identity is confirmed by mpn == toy number, or the toy number in the name.
 
 const BASE = (process.env.COOLSHOP_BASE || 'https://www.coolshop.is').replace(/\/+$/, '');
 const REQ_DELAY = Number(process.env.COOLSHOP_REQ_DELAY_MS || 200);
 const RETAILER = 'coolshop';
+const MATTEL_RE = /^[A-Z]{3}\d{2}$/;
+const MATTEL_QUERIES = (process.env.COOLSHOP_MATTEL_QUERIES || 'hot wheels brick shop,mattel brick shop,brick shop elite,brick shop speed')
+  .split(',').map((s) => s.trim()).filter(Boolean);
 const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)';
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -61,21 +71,41 @@ function parseIsk(s) {
 // same digits as their own article number). Returns "/vara/<slug>/<id>/" or null.
 function resolvePathForSku(resultsHtml, sku) {
   const links = [...resultsHtml.matchAll(/href="(\/vara\/[^"]+\/[A-Z0-9]+\/)"/g)].map(m => m[1]);
-  const rx = new RegExp(`(?:^|[^0-9])${sku}(?:[^0-9]|/)`); // sku as a bounded token in the slug
+  const rx = new RegExp(`(?:^|[^0-9a-z])${sku}(?:[^0-9a-z]|/)`, 'i'); // sku as a bounded token in the slug
   const candidates = links.filter(p => rx.test(p));
   if (!candidates.length) return null;
   return candidates.find(p => /\/vara\/lego-/i.test(p)) || candidates[0];
 }
 
-async function searchPath(sku) {
-  const res = await fetchWithRetry(`${BASE}/api/search?q=${encodeURIComponent(sku)}`, {
+async function searchResults(q) {
+  const res = await fetchWithRetry(`${BASE}/api/search?q=${encodeURIComponent(q)}`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'X-Requested-With': 'XMLHttpRequest' },
     body: '{}',
   });
   const data = await res.json();
-  if (!data || !data.count) return null;
-  return resolvePathForSku(data.results || '', sku);
+  return data && data.count ? (data.results || '') : '';
+}
+
+async function searchPath(sku) {
+  const html = await searchResults(sku);
+  return html ? resolvePathForSku(html, sku) : null;
+}
+
+// Mattel: one pass of keyword searches -> { TOYNO: path } from slugs ending in -<toyno>/.
+async function mattelPaths() {
+  const map = new Map();
+  for (const q of MATTEL_QUERIES) {
+    try {
+      const html = await searchResults(q);
+      for (const [, path, toy] of html.matchAll(/href="(\/vara\/[^"]*-([a-z]{3}\d{2})\/[A-Z0-9]+\/)"/g)) {
+        const k = toy.toUpperCase();
+        if (!map.has(k)) map.set(k, path);
+      }
+    } catch (e) { console.warn(`[${RETAILER}] mattel search "${q}" failed: ${e.message}`); }
+    await sleep(REQ_DELAY);
+  }
+  return map;
 }
 
 // Parse the product page JSON-LD Product block.
@@ -104,17 +134,20 @@ function parseProductLd(html) {
 }
 
 /**
- * scrape(skus) — fetch price/stock for the given LEGO set numbers from Coolshop.is.
+ * scrape(skus) — fetch price/stock for LEGO set numbers and Mattel Brick Shop toy numbers from Coolshop.is.
  * @param {string[]} skus e.g. ['42172','10357']
  * @returns {Promise<Array>} normalised records (only SKUs Coolshop actually carries)
  */
 export async function scrape(skus = []) {
   const wanted = [...new Set(skus.map(s => String(s).trim()))];
   const out = [];
+  const mattelMap = wanted.some(s => MATTEL_RE.test(s)) ? await mattelPaths() : new Map();
+  if (mattelMap.size) console.error(`[${RETAILER}] mattel: ${mattelMap.size} set(s) found by keyword search`);
 
   for (const sku of wanted) {
+    const mattel = MATTEL_RE.test(sku);
     try {
-      const path = await searchPath(sku);
+      const path = (mattel && mattelMap.get(sku)) || await searchPath(sku);
       await sleep(REQ_DELAY);
       if (!path) continue; // not carried / no confident match
 
@@ -127,9 +160,13 @@ export async function scrape(skus = []) {
       // Must actually be LEGO: other brands (e.g. Gonher) sometimes reuse the same
       // digits as their own article number, so guard on brand/name.
       const isLego = /lego/i.test(ld.brand || '') || /lego/i.test(ld.name || '');
-      if (!isLego) continue;
-      // Defensive: the product's manufacturer part number should be the LEGO SKU.
-      if (ld.mpn && ld.mpn !== sku) continue;
+      const isBrickShop = /brick shop|hot wheels|mattel/i.test(ld.name || '');
+      if (mattel ? !isBrickShop : !isLego) continue;
+      // Defensive: the product's manufacturer part number should be the set/toy number.
+      // For Mattel the slug alone isn't enough: require the toy number as the mpn or in
+      // the product name ("… Miura P400 SV (JHF61)") — Coolshop uses either.
+      const toyInName = new RegExp(`(?:^|[^A-Z0-9])${sku}(?:[^A-Z0-9]|$)`, 'i').test(ld.name || '');
+      if (mattel ? !(String(ld.mpn || '').toUpperCase() === sku || toyInName) : (ld.mpn && ld.mpn !== sku)) continue;
 
       out.push({
         retailer: RETAILER,

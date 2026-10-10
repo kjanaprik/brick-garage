@@ -18,6 +18,15 @@
 // Emits the shared retailer contract:
 //   { retailer, sku, name, price_isk, rrp_isk, on_sale, in_stock, url, scraped_at }
 
+// Mattel Brick Shop: Kids-world lists these under machine-translated Icelandic names —
+// "Hot Wheels Múrsteinsverkstæði Sett - Elite serían - Corvette Gra…" — with no toy
+// number or barcode anywhere, and names cut short. Keyword searches return the whole
+// range; each card is identified by mattel-match.mjs from its series + car-name words
+// (URL slug + name). Ambiguous titles are skipped rather than guessed.
+import { matchMattel, isMattel } from './mattel-match.mjs';
+const MATTEL_QUERIES = (process.env.KIDSWORLD_MATTEL_QUERIES || 'Hot Wheels Sett,Múrsteinsverkstæði,Hot Wheels serían')
+  .split(',').map((s) => s.trim()).filter(Boolean);
+
 const BASE   = (process.env.KIDSWORLD_BASE || 'https://www.kids-world.com').replace(/\/+$/, '');
 const LOCALE = process.env.KIDSWORLD_LOCALE || 'is-is';
 const REQ_DELAY = Number(process.env.KIDSWORLD_REQ_DELAY_MS || 250);
@@ -53,16 +62,32 @@ function parseIsk(s) {
   return Number.isFinite(n) ? n : null;
 }
 
+// Search results mix two card layouts: <div class="product product-size-selection">
+// (with price data-attributes) and plain <div class="product"> (without). Splitting on
+// only the first merged plain cards into their neighbour, so their products were never
+// seen. Split on both; prices come from the product page either way.
+const CARD_SPLIT = /(?=<div class="product(?:"| product-))/;
+
+// Named entities Kids-world uses, incl. Icelandic letters (Múrsteinsverkstæði …).
+const ENTITIES = {
+  reg: '®', amp: '&', quot: '"', apos: "'", lt: '<', gt: '>', nbsp: ' ',
+  aacute: 'á', eacute: 'é', iacute: 'í', oacute: 'ó', uacute: 'ú', yacute: 'ý',
+  Aacute: 'Á', Eacute: 'É', Iacute: 'Í', Oacute: 'Ó', Uacute: 'Ú', Yacute: 'Ý',
+  eth: 'ð', ETH: 'Ð', thorn: 'þ', THORN: 'Þ', aelig: 'æ', AElig: 'Æ', ouml: 'ö', Ouml: 'Ö',
+  aring: 'å', Aring: 'Å', oslash: 'ø', Oslash: 'Ø', auml: 'ä', uuml: 'ü', trade: '™',
+};
+
 function decode(s) {
   return String(s || '')
-    .replace(/&reg;/g, '®').replace(/&amp;/g, '&').replace(/&aring;/g, 'å')
-    .replace(/&aelig;/g, 'æ').replace(/&oslash;/g, 'ø').replace(/&ouml;/g, 'ö')
-    .replace(/&#?\w+;/g, ' ').replace(/\s+/g, ' ').trim();
+    .replace(/&#(\d+);/g, (_, d) => String.fromCodePoint(Number(d)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCodePoint(parseInt(h, 16)))
+    .replace(/&([a-zA-Z]+);/g, (m, n) => ENTITIES[n] ?? ' ')
+    .replace(/\s+/g, ' ').trim();
 }
 
 // From the search HTML, find the card matching this SKU and pull its fields.
 function findCard(html, sku) {
-  const cards = html.split(/(?=<div class="product product-size-selection")/);
+  const cards = html.split(CARD_SPLIT);
   const tok = new RegExp(`(?:^|[^0-9])${sku}(?:[^0-9])`);
   const linkRe = /href="(\/is-is\/[a-z0-9-]+-p-\d+\.html)"/i;
   // Prefer a card whose product link slug contains the SKU as a bounded token.
@@ -96,14 +121,63 @@ function parseProductLd(html) {
   return null;
 }
 
+// Mattel: keyword searches -> Brick Shop cards -> matched toy number -> product page.
+async function scrapeMattel(wantedMattel, catalog) {
+  const want = new Set(wantedMattel);
+  const cards = new Map();                                  // path -> card
+  const linkRe = /href="(\/is-is\/[a-z0-9-]+-p-\d+\.html)"/i;
+  for (const q of MATTEL_QUERIES) {
+    try {
+      const html = await getText(`${BASE}/${LOCALE}/advanced_search_result.php?keywords=${encodeURIComponent(q)}`);
+      for (const c of html.split(CARD_SPLIT)) {
+        const path = (c.match(linkRe) || [])[1];
+        if (!path || cards.has(path) || !/murstein/i.test(path)) continue;   // Brick Shop listings only
+        cards.set(path, {
+          path,
+          final: parseIsk((c.match(/data-final-product-price="([^"]+)"/) || [])[1]),
+          base: parseIsk((c.match(/data-base-product-price="([^"]+)"/) || [])[1]),
+          name: decode((c.match(/<img[^>]*\balt="([^"]+)"/i) || [])[1]) || null,
+        });
+      }
+    } catch (e) { console.warn(`[${RETAILER}] mattel search "${q}" failed: ${e.message}`); }
+    await sleep(REQ_DELAY);
+  }
+  const out = [], seen = new Set();
+  let unmatched = 0;
+  for (const card of cards.values()) {
+    const slug = card.path.replace(/^\/is-is\//, '').replace(/-p-\d+\.html$/, '');
+    const m = matchMattel(`${slug} ${card.name || ''}`, catalog);
+    if (!m) { unmatched++; continue; }
+    if (!want.has(m.n) || seen.has(m.n)) continue;
+    seen.add(m.n);
+    let ld = null;
+    try { ld = parseProductLd(await getText(BASE + card.path)); await sleep(REQ_DELAY); } catch { /* card fallback */ }
+    const price_isk = (ld && parseIsk(ld.price)) ?? card.final;
+    const on_sale = card.base != null && card.final != null && card.base > card.final;
+    out.push({
+      retailer: RETAILER, sku: m.n, name: decode(ld && ld.name) || card.name,
+      price_isk, rrp_isk: on_sale ? card.base : null, on_sale,
+      in_stock: ld ? /InStock/i.test(ld.availability) : true,
+      url: BASE + card.path, scraped_at: new Date().toISOString(), matched_by: m.via,
+    });
+  }
+  console.error(`[${RETAILER}] mattel: ${cards.size} Brick Shop listing(s), ${out.length} matched to tracked sets` +
+    (unmatched ? `, ${unmatched} ambiguous/unknown skipped` : ''));
+  return out;
+}
+
 /**
- * scrape(skus) — fetch price/stock for the given LEGO set numbers from kids-world.com.
+ * scrape(skus) — fetch price/stock for LEGO set numbers (and, given opts.mattelCatalog,
+ * Mattel Brick Shop toy numbers) from kids-world.com.
  * @param {string[]} skus
  * @returns {Promise<Array>} normalised records (only SKUs kids-world carries)
  */
-export async function scrape(skus = []) {
-  const wanted = [...new Set(skus.map(s => String(s).trim()))];
+export async function scrape(skus = [], _names = null, opts = {}) {
+  const all = [...new Set(skus.map(s => String(s).trim()))];
+  const wanted = all.filter(s => !isMattel(s));
+  const wantedMattel = all.filter(isMattel);
   const out = [];
+  if (wantedMattel.length && opts.mattelCatalog?.length) out.push(...await scrapeMattel(wantedMattel, opts.mattelCatalog));
   for (const sku of wanted) {
     try {
       const searchUrl = `${BASE}/${LOCALE}/advanced_search_result.php?keywords=${encodeURIComponent(sku)}`;

@@ -9,6 +9,15 @@
 //   * optin (members/activated discount) is preferred as the headline price,
 //     with base as rrp — this matches what the site actually charges you
 
+import { matchMattel, isMattel } from './mattel-match.mjs';
+
+// Mattel Brick Shop: Boozt lists these under brand "Mattel Brick Shop" with no toy
+// number, but with the piece count in the name ("… (918 Pieces)"). A couple of keyword
+// searches return the whole range; each product is identified by mattel-match.mjs
+// (piece count + car-name word). Two requests per run, done before the LEGO loop so a
+// rate-limit abort there can't cost the Mattel prices.
+const MATTEL_QUERIES = ['mattel brick shop', 'brick shop hot wheels'];
+
 const UA =
   'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 ' +
   '(KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
@@ -175,10 +184,39 @@ function makeScraper(retailer, host) {
     // in lockstep through the same rate limiter.
     if (opts.startDelayMs) await sleep(opts.startDelayMs);
     const misses = opts.misses || {};   // { sku: consecutive total misses }, mutated in place
-    const wanted = [...new Set((skus || []).map((s) => String(s).trim()).filter(Boolean))];
+    const all = [...new Set((skus || []).map((s) => String(s).trim()).filter(Boolean))];
+    const wanted = all.filter((s) => !isMattel(s));
+    const wantedMattel = all.filter(isMattel);
     const out = [];
-    const stats = { requested: wanted.length, hit: 0, byName: 0, miss: 0, error: 0, skipped: 0, aborted: false, errorSkus: [] };
+    const stats = { requested: all.length, hit: 0, byName: 0, miss: 0, error: 0, skipped: 0, aborted: false, errorSkus: [], mattel: 0 };
     let consecutive429 = 0;
+
+    // ---- Mattel Brick Shop (keyword searches + title matching) ----
+    if (wantedMattel.length && opts.mattelCatalog?.length) {
+      const want = new Set(wantedMattel);
+      const found = new Map();
+      let failed = 0;
+      for (const q of MATTEL_QUERIES) {
+        try {
+          const products = await getProducts(searchUrl(host, q));
+          for (const o of products) {
+            if (!/mattel brick shop/i.test(String(o.brand_name || '')) && !/brick shop/i.test(String(o.product_name || ''))) continue;
+            const slug = String(o.product_url || '').split('/').pop().replace(/_\d+$/, '');
+            const m = matchMattel(`${o.product_name || ''} ${slug}`, opts.mattelCatalog);
+            if (m && want.has(m.n) && !found.has(m.n)) found.set(m.n, o);
+          }
+        } catch (e) {
+          failed++;
+          if (e instanceof RateLimited) consecutive429++;
+          console.warn(`[${retailer}] mattel search "${q}" failed: ${e.message}`);
+        }
+        await sleep(REQ_DELAY + Math.random() * REQ_JITTER);
+      }
+      for (const [n, o] of found) out.push(normalise(retailer, o, n));
+      stats.mattel = found.size;
+      // Every search failed: these weren't checked, so let carry-forward hold their rows.
+      if (failed === MATTEL_QUERIES.length) { stats.error += wantedMattel.length; stats.errorSkus.push(...wantedMattel); }
+    }
 
     for (const sku of wanted) {
       if (consecutive429 >= RATE_LIMIT_ABORT_AFTER) {
@@ -232,6 +270,7 @@ function makeScraper(retailer, host) {
 
     console.log(
       `[${retailer}] ${stats.hit} hit (${stats.byName} via name) / ${stats.miss} miss / ` +
+        (wantedMattel.length ? `${stats.mattel}/${wantedMattel.length} Mattel / ` : '') +
         `${stats.error} error of ${stats.requested}` +
         (stats.skipped ? `, ${stats.skipped} fallback skipped` : '') +
         (stats.aborted ? ` [ABORTED: ${stats.aborted}]` : '') +

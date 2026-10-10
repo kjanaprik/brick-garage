@@ -70,11 +70,14 @@ const CARRY_FLOOR = Number(process.env.PRICES_CARRY_FLOOR || 0.75);
 
 // [label, scraper, options]. `mattel: true` = the adapter can resolve Mattel Brick
 // Shop toy numbers; the rest only ever see LEGO set numbers, so they can't produce a
-// false positive from a search for "JKG40".
+// false positive from a search for "JKG40". How each one identifies a Mattel set:
+//   Brickshop, Brickmo, Coolshop  toy number published on the product (exact)
+//   Boozt/Booztlet, Kids-world    no toy number — title matching via mattel-match.mjs
+//                                 (piece count / series + car name), given mattelCatalog
 const ADAPTERS = [
-  ['Kubbabúðin', scrapeKubbabudin], ['Coolshop', scrapeCoolshop],
-  ['Boozt', scrapeBoozt], ['Booztlet', scrapeBooztlet],
-  ['Kids-world', scrapeKidsworld], ['ELKO', scrapeElko], ['Trekk', scrapeTrekk],
+  ['Kubbabúðin', scrapeKubbabudin], ['Coolshop', scrapeCoolshop, { mattel: true }],
+  ['Boozt', scrapeBoozt, { mattel: true }], ['Booztlet', scrapeBooztlet, { mattel: true }],
+  ['Kids-world', scrapeKidsworld, { mattel: true }], ['ELKO', scrapeElko], ['Trekk', scrapeTrekk],
   ['Brickshop', scrapeBrickshop, { mattel: true }],
   ['Brickmo', scrapeBrickmo, { mattel: true }],
 ];
@@ -199,6 +202,12 @@ async function main() {
   const skus = [...new Set([...cat.map((e) => String(e.n)), ...added.map((s) => s.n)])]
     .filter((s) => !ignore.has(s) && !owned.has(s));
   const legoSkus = skus.filter((s) => !isMattel(s));
+  // What the title-matching adapters need to tell Mattel sets apart. Catalog entries carry
+  // series + piece count; KV-added sets only a name, which still works for unambiguous ones.
+  const mattelCatalog = [
+    ...cat.filter((e) => isMattel(e.n)).map(({ n, name, series, pieces }) => ({ n, name, series, pieces })),
+    ...added.filter((s) => isMattel(s.n) && s.name).map(({ n, name }) => ({ n, name })),
+  ].filter((e) => skus.includes(String(e.n)));
   const mattelCount = skus.length - legoSkus.length;
   if (owned.size) console.error(`[prices] skipping ${owned.size} owned set(s)`);
   console.error(`[prices] tracking ${skus.length} sets (${legoSkus.length} LEGO, ${mattelCount} Mattel); ` +
@@ -224,6 +233,7 @@ async function main() {
       // name search (Boozt/Booztlet). Others ignore both extra args.
       rows = await fn(input, nameOf, {
         misses: (missCounts[label] ??= {}),
+        mattelCatalog,
         // Booztlet shares Boozt's backend — start it late so they don't collide.
         startDelayMs: label === 'Booztlet' ? 45000 : 0,
       });
