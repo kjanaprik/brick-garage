@@ -652,7 +652,21 @@ async function load(){
   if (!data || !Array.isArray(data)){
     SETS = CATALOG.map(seed);
   } else {
-    SETS = data;
+    // The saved copy holds a full snapshot of each set from when it was first stored.
+    // Refresh the catalog's own details (name, pieces, image, series, note…) from the
+    // current CATALOG on every load, so catalog fixes reach browsers that already have
+    // saved data. Only the user's own fields survive from the saved copy — status,
+    // pricePaid, userNotes — plus prod, which Brickset keeps current at runtime.
+    // Custom (user-added) sets aren't in CATALOG and are left untouched.
+    const CAT_BY_N = new Map(CATALOG.map(c => [c.n, c]));
+    const CAT_OPTIONAL = ['img', 'note', 'series', 'scale'];   // may be removed from an entry
+    SETS = data.map(s => {
+      const c = CAT_BY_N.get(s.n);
+      if (!c || s.custom === true) return s;
+      const merged = { ...s, ...c, prod: s.prod || c.prod };
+      for (const k of CAT_OPTIONAL) if (!(k in c)) delete merged[k];
+      return merged;
+    });
     const have = new Set(SETS.map(s=>s.n));
     CATALOG.forEach(c=>{ if(!have.has(c.n)) SETS.push(seed(c)); });
   }
