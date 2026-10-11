@@ -11,6 +11,15 @@
 //   3. Car-name words, prefix-tolerant at the end of the title because Kids-world cuts
 //      names off ("Corvette Gra…", "'90 Acura NS…").
 //
+// Piece-count guard: when the title states a piece count, a candidate whose catalog
+// count differs (beyond ±2 for box-revision noise) is ruled out — an 858-piece box is
+// not the 225-piece Silverado, however many words they share.
+//
+// Callers must pass the FULL Mattel catalog, owned sets included, and filter the
+// result afterwards. Matching against only the still-wanted sets lets a listing for an
+// owned car fall through to the next-closest wanted one (the '62 Chevy Pickup landing
+// on the '83 Silverado once the Pickup was owned).
+//
 // Variant guard: a catalog name's parenthetical/qualifier words — "(yellow)",
 // "Deluxe Version" — must appear in the title, so the plain listing never matches the
 // variant. When two sets still tie, nothing is returned: a missing price is better
@@ -90,6 +99,7 @@ export function matchMattel(title, catalog) {
   const scored = [];
   for (const e of catalog.map(prepEntry)) {
     if (tSeries && e.series && tSeries !== e.series) continue;
+    if (tPieces && e.pieces && Math.abs(e.pieces - tPieces) > 2) continue;   // stated count contradicts
     if (e.qualifiers.length && !e.qualifiers.every((q) => tt.includes(q))) continue;
     const hits = e.words.filter(has);
     const strong = hits.filter((w) => !/^\d{2}$/.test(w));                      // a model year alone proves little
@@ -102,7 +112,7 @@ export function matchMattel(title, catalog) {
 
   // Piece count is decisive when the title has one and exactly one candidate shares it.
   if (tPieces) {
-    const byPieces = scored.filter((s) => s.e.pieces === tPieces);
+    const byPieces = scored.filter((s) => s.e.pieces != null && Math.abs(s.e.pieces - tPieces) <= 2);
     if (byPieces.length === 1) return { n: byPieces[0].e.n, via: 'pieces' };
   }
   scored.sort((a, b) => b.score - a.score || b.strong - a.strong);

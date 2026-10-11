@@ -14,7 +14,10 @@
 //        the 1x14 brick part 4217), plus Schema.org microdata inside the buybox:
 //          <meta itemprop="price" content="49.99">
 //          <link itemprop="availability" href="https://schema.org/PreOrder">
-//   3. A real buy button (buybox--button) only when the item can be ordered. Pre-order
+//   3. The brand: itemprop="brand" ("LEGO Online-Shop", "Mattel Brick Shop", "Mould King")
+//      and the article-number suffix (_LE / _MA / _MK …). Required to match the kind of
+//      set number asked for — other brands reuse LEGO-style numbers (Mould King 10248).
+//   4. A real buy button (buybox--button) only when the item can be ordered. Pre-order
 //      items without one show a "will be released at <date>" line and a notify form.
 //
 // Pricing — item price only (no shipping, no fees, no Icelandic import VAT):
@@ -172,6 +175,17 @@ function parseProduct(html, sku, url) {
   const productNo = ((html.match(/Product no:\s*<\/td>\s*<td[^>]*>\s*([^<\s]+)\s*</i) || [])[1] || '').trim();
   if (productNo.toUpperCase() !== String(sku).toUpperCase()) return null;   // wrong product
 
+  // Right number, right brand? Brickmo also sells LEGO-compatible brands whose set
+  // numbers collide with LEGO's — Mould King's 10248 "JZK V8 Hyper Engine" vs the LEGO
+  // Ferrari F40 10248. Every page states the brand (itemprop="brand") and its article
+  // number carries a brand suffix: _LE LEGO, _MA Mattel, _MK Mould King, …
+  const brand = (html.match(/itemprop="brand"[^>]*content="([^"]+)"/i) || [])[1] || '';
+  const articleNo = ((html.match(/Article no:\s*<\/td>\s*<td[^>]*>\s*([^<\s]+)\s*</i) || [])[1] || '').trim();
+  const brandOk = isMattel(sku)
+    ? /mattel|hot wheels/i.test(brand) || /_MA$/i.test(articleNo)
+    : /\blego\b/i.test(brand) || /_LE$/i.test(articleNo);
+  if (!brandOk) return null;
+
   // Price/availability from the buybox only — cross-sell sliders further down the
   // page carry their own prices.
   const offerIdx = html.indexOf('itemprop="offers"');
@@ -262,7 +276,7 @@ export async function scrape(skus = []) {
   }
   await Promise.all(Array.from({ length: Math.min(CONCURRENCY, wanted.length || 1) }, worker));
   console.error(`[${RETAILER}] ${out.length} priced, ${stats.searched} searched, ` +
-    `${stats.mismatched} rejected (Product no mismatch), ${stats.error} errors`);
+    `${stats.mismatched} rejected (wrong Product no or brand), ${stats.error} errors`);
   out.stats = stats;
   return out;
 }

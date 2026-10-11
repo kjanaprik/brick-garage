@@ -204,10 +204,14 @@ async function main() {
   const legoSkus = skus.filter((s) => !isMattel(s));
   // What the title-matching adapters need to tell Mattel sets apart. Catalog entries carry
   // series + piece count; KV-added sets only a name, which still works for unambiguous ones.
+  // Deliberately the FULL list — owned and ignored sets included. The adapters only keep
+  // matches for sets they were asked about, but they must be able to recognise every car:
+  // match against a subset and a listing for an owned car gets pinned on its nearest
+  // wanted lookalike.
   const mattelCatalog = [
     ...cat.filter((e) => isMattel(e.n)).map(({ n, name, series, pieces }) => ({ n, name, series, pieces })),
-    ...added.filter((s) => isMattel(s.n) && s.name).map(({ n, name }) => ({ n, name })),
-  ].filter((e) => skus.includes(String(e.n)));
+    ...added.filter((s) => isMattel(s.n) && s.name && !cat.some((e) => e.n === s.n)).map(({ n, name }) => ({ n, name })),
+  ];
   const mattelCount = skus.length - legoSkus.length;
   if (owned.size) console.error(`[prices] skipping ${owned.size} owned set(s)`);
   console.error(`[prices] tracking ${skus.length} sets (${legoSkus.length} LEGO, ${mattelCount} Mattel); ` +
