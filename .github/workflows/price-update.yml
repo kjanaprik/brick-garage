@@ -27,9 +27,11 @@ jobs:
     # it can no longer be the thing that overruns.
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
+        with:
+          ref: main
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: '22'
 
@@ -75,7 +77,17 @@ jobs:
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git add $FILES
             git commit -m "Update prices ($(date -u +%Y-%m-%d))"
-            git push
+            # Re-runs and dispatches can race a newer commit on main, so rebase onto
+            # the current tip (-X theirs: the fresh scrape wins any conflict) and retry.
+            for attempt in 1 2 3; do
+              if git pull --rebase -X theirs origin main && git push origin HEAD:main; then
+                exit 0
+              fi
+              echo "Push attempt ${attempt} failed."
+              [ "$attempt" -lt 3 ] && sleep 10
+            done
+            echo "Push failed after 3 attempts."
+            exit 1
           fi
 
       - name: Price-drop issue
