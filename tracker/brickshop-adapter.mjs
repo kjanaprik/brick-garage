@@ -6,7 +6,9 @@
 // scraper. It's inherently more fragile than the Kubbabúðin Algolia feed — if
 // they retheme or change URL structure it will need attention. Two stable-ish
 // anchors it relies on:
-//   1. Product URLs embed the LEGO set number: /lego/<cat>/lego-<SKU>-<slug>.html
+//   1. Product URLs embed the LEGO set number: /lego/<cat>/lego-<SKU>-<slug>[.html]
+//      Older listings end in .html; newer ones (e.g. 21061, 21060, 21330) have no
+//      extension. Several sets are reachable under both (same product, same sku).
 //   2. Product pages carry Schema.org microdata:
 //        <span itemprop="price" content="23.79">
 //        <meta itemprop="priceCurrency" content="EUR">
@@ -52,14 +54,24 @@ import { getRates } from './fx.mjs';
 const RETAILER = 'brickshop';
 const UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko)';
 
-const PRODUCT_RE = /(\/lego\/[a-z0-9/-]+\/lego-(\d{3,6})[a-z0-9/-]*\.html)/gi;
+// .html is optional (newer product URLs have no extension); the lookahead pins the
+// match to the end of the href so a slug can't be cut short.
+const PRODUCT_RE = /(\/lego\/[a-z0-9/-]+\/lego-(\d{3,6})(?:-[a-z0-9-]*)?(?:\.html)?)(?=["'?#\s])/gi;
 
 // Mattel Brick Shop toy numbers, e.g. JKG40 / HWW25.
 const MATTEL_RE = /^[A-Z]{3}\d{2}$/;
 const MATTEL_CATEGORY = process.env.BRICKSHOP_MATTEL_CATEGORY || 'mattel-brick-shop.html';
-const MATTEL_PRODUCT_RE = /href=["'](\/mattel-brick-shop\/[^"'#?\s]+\.html)["']/gi;
+const MATTEL_PRODUCT_RE = /href=["'](\/mattel-brick-shop\/[^"'#?\s.]+(?:\.html)?)["']/gi;
 
 // --- helpers ---------------------------------------------------------------
+
+// When a set is reachable under both URL styles, keep the .html one so existing
+// rows in prices.json don't change URL (the page behind both is the same product).
+const preferPath = (a, b) => (!a ? b : (!a.endsWith('.html') && b.endsWith('.html')) ? b : a);
+
+// itemprop="sku" from a product page (uppercased), or '' if absent.
+const pageSku = (html) =>
+  ((html.match(/itemprop=["']sku["'][^>]*content=["']([^"']+)["']/i) || [])[1] || '').trim().toUpperCase();
 
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
@@ -158,7 +170,7 @@ async function buildSkuMap() {
   // category stays sequential since it stops once a page yields no new SKUs).
   const results = await Promise.all(CATEGORIES.map(crawlCategory));
   const map = new Map();
-  for (const pairs of results) for (const [sku, path] of pairs) if (!map.has(sku)) map.set(sku, path);
+  for (const pairs of results) for (const [sku, path] of pairs) map.set(sku, preferPath(map.get(sku), path));
   return map;
 }
 
@@ -220,16 +232,18 @@ function parseProduct(html, sku, path) {
 /**
  * Resolve a single SKU to its product path via Brickshop's site search.
  * Catches sets in categories the crawl doesn't cover (e.g. lego-exclusives,
- * lego-creator) and retired sets. Returns "/lego/.../lego-<sku>-...html" or null.
+ * lego-creator, lego-architecture) and retired sets.
+ * Returns "/lego/.../lego-<sku>[-slug][.html]" or null.
  */
 async function searchResolve(sku) {
   const url = `${BASE}/component/search/?searchword=${encodeURIComponent(sku)}&searchphrase=all`;
   let html;
   try { html = await getText(url); } catch { return null; }
-  // exact-SKU product link only (avoid fuzzy name matches)
-  const re = new RegExp(`(/lego/[a-z0-9/-]+/lego-${sku}(?:[^0-9][a-z0-9/-]*)?\\.html)`, 'i');
-  const m = html.match(re);
-  return m ? m[1] : null;
+  // exact-SKU product links only (avoid fuzzy name matches); .html optional
+  const re = new RegExp(`href=["'](/lego/[a-z0-9/-]+/lego-${sku}(?:-[a-z0-9-]*)?(?:\\.html)?)["'?#]`, 'gi');
+  let best = null;
+  for (const m of html.matchAll(re)) best = preferPath(best, m[1]);
+  return best;
 }
 
 /**
@@ -256,7 +270,7 @@ async function scrapeMattel(wantedMattel) {
   for (const path of paths) {
     try {
       const html = await getText(BASE + encodeURI(decodeURI(path)));
-      const sku = ((html.match(/itemprop=["']sku["'][^>]*content=["']([^"']+)["']/i) || [])[1] || '').trim().toUpperCase();
+      const sku = pageSku(html);
       if (!want.has(sku)) continue;
       const rec = parseProduct(html, sku, path);
       if (rec.price_eur != null) out.push(rec);
@@ -299,6 +313,11 @@ export async function scrape(skus = []) {
         const path = map.get(sku) || await searchResolve(sku);
         if (!path) continue;                       // not carried anywhere on the site
         const html = await getText(BASE + path);
+        const onPage = pageSku(html);
+        if (onPage && onPage !== sku.toUpperCase()) {   // URL matched, page is a different set
+          console.warn(`[${RETAILER}] ${sku}: ${path} carries sku ${onPage}, skipped`);
+          continue;
+        }
         const rec = parseProduct(html, sku, path);
         if (rec.price_eur != null || rec.name) out.push(rec);
       } catch (e) {
